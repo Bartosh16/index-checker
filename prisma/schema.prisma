@@ -1,0 +1,115 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum RunStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+enum CheckSource {
+  LIVE
+  CACHE
+}
+
+enum GscStatus {
+  PASS
+  FAIL
+  UNKNOWN
+  SKIPPED
+  ERROR
+}
+
+enum SerpStatus {
+  VISIBLE
+  NOT_VISIBLE
+  SKIPPED
+  ERROR
+}
+
+model Project {
+  id             String           @id @default(cuid())
+  name           String
+  domain         String           @db.VarChar(255)
+  sitemapUrl     String           @db.Text
+  gscPropertyUrl String           @db.Text
+  serperHl       String           @default("pl") @db.VarChar(16)
+  serperGl       String           @default("pl") @db.VarChar(16)
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+  urls           SitemapUrl[]
+  runs           UrlCheckRun[]
+  results        UrlCheckResult[]
+
+  @@index([domain])
+}
+
+model SitemapUrl {
+  id                String           @id @default(cuid())
+  projectId         String
+  url               String           @db.Text
+  normalizedUrl     String           @db.Text
+  normalizedUrlHash String           @db.VarChar(64)
+  lastmod           DateTime?
+  discoveredAt      DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  project           Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  results           UrlCheckResult[]
+
+  @@unique([projectId, normalizedUrlHash])
+  @@index([projectId])
+}
+
+model UrlCheckRun {
+  id            String           @id @default(cuid())
+  projectId     String
+  status        RunStatus        @default(PENDING)
+  totalUrls     Int              @default(0)
+  processedUrls Int              @default(0)
+  cacheHits     Int              @default(0)
+  errors        Int              @default(0)
+  startedAt     DateTime?
+  finishedAt    DateTime?
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+  project       Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  results       UrlCheckResult[]
+
+  @@index([projectId, createdAt])
+  @@index([status])
+}
+
+model UrlCheckResult {
+  id                String      @id @default(cuid())
+  projectId         String
+  sitemapUrlId      String
+  runId             String
+  source            CheckSource @default(LIVE)
+  checkedAt         DateTime    @default(now())
+  gscStatus         GscStatus   @default(UNKNOWN)
+  gscVerdict        String?
+  gscCoverageState  String?
+  gscIndexingState  String?
+  gscRobotsTxtState String?
+  gscLastCrawlTime  DateTime?
+  gscError          String?     @db.Text
+  serpStatus        SerpStatus  @default(NOT_VISIBLE)
+  serpVisible       Boolean     @default(false)
+  serpQuery         String      @db.Text
+  serpMatchedUrl    String?     @db.Text
+  serpError         String?     @db.Text
+  project           Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  sitemapUrl        SitemapUrl  @relation(fields: [sitemapUrlId], references: [id], onDelete: Cascade)
+  run               UrlCheckRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@unique([runId, sitemapUrlId])
+  @@index([projectId, checkedAt])
+  @@index([sitemapUrlId, checkedAt])
+}

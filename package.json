@@ -1,0 +1,40 @@
+{
+  "name": "index-checker",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate dev",
+    "db:push": "prisma db push",
+    "db:studio": "prisma studio"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.9.0",
+    "fast-xml-parser": "^5.9.0",
+    "google-auth-library": "^10.7.0",
+    "lucide-react": "^1.18.0",
+    "next": "^16.2.9",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
+  },
+  "devDependencies": {
+    "@rolldown/binding-win32-x64-msvc": "^1.0.3",
+    "@types/node": "^22.10.0",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "eslint": "^9.39.4",
+    "eslint-config-next": "^16.2.9",
+    "prisma": "^6.9.0",
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.9"
+  },
+  "overrides": {
+    "postcss": "^8.5.15"
+  }
+}
