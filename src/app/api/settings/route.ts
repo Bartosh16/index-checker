@@ -3,11 +3,23 @@ import { jsonError, readJson } from "@/lib/api";
 import { readLocalSettings, saveLocalSettings } from "@/lib/local-settings";
 
 type SaveSettingsBody = {
+  checkProvider?: string;
+  clearDataForSeoCredentials?: boolean;
   clearGoogleServiceAccountJson?: boolean;
+  clearSerpApiKey?: boolean;
   clearSerperApiKey?: boolean;
+  dataForSeoLanguageCode?: string;
+  dataForSeoLocationCode?: string;
+  dataForSeoLocationName?: string;
+  dataForSeoLogin?: string;
+  dataForSeoPassword?: string;
   googleServiceAccountFile?: string;
   googleServiceAccountJson?: string;
   gscLanguageCode?: string;
+  searxngBaseUrl?: string;
+  searxngEngines?: string;
+  serpApiKey?: string;
+  serpQueryStrategy?: string;
   serperApiKey?: string;
 };
 

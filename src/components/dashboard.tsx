@@ -1,7 +1,13 @@
 "use client";
 
 import { Download, FileSearch, Play, RefreshCcw, Settings2 } from "lucide-react";
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  CHECK_PROVIDER_VALUES,
+  PROVIDER_LABELS,
+  SERP_QUERY_STRATEGY_LABELS,
+  SERP_QUERY_STRATEGY_VALUES
+} from "@/lib/check-providers";
 import { toCsv } from "@/lib/csv";
 import type { LocalSettings } from "@/lib/local-settings";
 import type { IndexStatus, SitemapCheckResponse, SitemapCheckRow } from "@/lib/sitemap-check";
@@ -13,9 +19,19 @@ type Notice = {
 };
 
 type SettingsForm = {
+  checkProvider: string;
+  dataForSeoLanguageCode: string;
+  dataForSeoLocationCode: string;
+  dataForSeoLocationName: string;
+  dataForSeoLogin: string;
+  dataForSeoPassword: string;
   googleServiceAccountFile: string;
   googleServiceAccountJson: string;
   gscLanguageCode: string;
+  searxngBaseUrl: string;
+  searxngEngines: string;
+  serpApiKey: string;
+  serpQueryStrategy: string;
   serperApiKey: string;
 };
 
@@ -44,17 +60,36 @@ export function Dashboard() {
     sitemapUrl: ""
   });
   const [settingsForm, setSettingsForm] = useState<SettingsForm>({
+    checkProvider: "AUTO",
+    dataForSeoLanguageCode: "pl",
+    dataForSeoLocationCode: "",
+    dataForSeoLocationName: "",
+    dataForSeoLogin: "",
+    dataForSeoPassword: "",
     googleServiceAccountFile: "",
     googleServiceAccountJson: "",
     gscLanguageCode: "pl-PL",
+    searxngBaseUrl: "",
+    searxngEngines: "google",
+    serpApiKey: "",
+    serpQueryStrategy: "SITE_THEN_URL",
     serperApiKey: ""
   });
 
   const settingsRef = useRef<HTMLElement | null>(null);
 
+  const loadSettings = useCallback(async () => {
+    try {
+      const data = await requestJson<{ settings: LocalSettings }>("/api/settings");
+      hydrateSettings(data.settings);
+    } catch (error) {
+      setNotice({ text: getErrorMessage(error), tone: "error" });
+    }
+  }, []);
+
   useEffect(() => {
     void loadSettings();
-  }, []);
+  }, [loadSettings]);
 
   const inferredGscProperty = useMemo(
     () => inferGscPropertyFromForm(form.domain, form.sitemapUrl),
@@ -69,19 +104,10 @@ export function Dashboard() {
     return result.rows.filter((row) => matchesFilter(row, filter));
   }, [filter, result]);
 
-  async function loadSettings() {
-    try {
-      const data = await requestJson<{ settings: LocalSettings }>("/api/settings");
-      setSettings(data.settings);
-      setSettingsForm((current) => ({
-        ...current,
-        googleServiceAccountFile: data.settings.googleServiceAccountFile || "",
-        gscLanguageCode: data.settings.gscLanguageCode || "pl-PL"
-      }));
-    } catch (error) {
-      setNotice({ text: getErrorMessage(error), tone: "error" });
-    }
-  }
+  const configuredProviderLabels = useMemo(
+    () => settings?.configuredProviders.map((provider) => PROVIDER_LABELS[provider]) ?? [],
+    [settings]
+  );
 
   async function runCheck(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -103,7 +129,7 @@ export function Dashboard() {
 
       setResult(data);
       setNotice({
-        text: `Checked ${data.summary.total} URLs using ${data.source}.`,
+        text: `Checked ${data.summary.total} URLs using ${PROVIDER_LABELS[data.source]}.`,
         tone: "ok"
       });
     } catch (error) {
@@ -131,13 +157,7 @@ export function Dashboard() {
         body: JSON.stringify(settingsForm),
         method: "POST"
       });
-      setSettings(data.settings);
-      setSettingsForm({
-        googleServiceAccountFile: data.settings.googleServiceAccountFile || "",
-        googleServiceAccountJson: "",
-        gscLanguageCode: data.settings.gscLanguageCode || "pl-PL",
-        serperApiKey: ""
-      });
+      hydrateSettings(data.settings);
       setNotice({ text: "Settings saved to .env.", tone: "ok" });
     } catch (error) {
       setNotice({ text: getErrorMessage(error), tone: "error" });
@@ -146,18 +166,20 @@ export function Dashboard() {
     }
   }
 
-  async function clearSetting(type: "serper" | "googleJson") {
+  async function clearSetting(type: "dataforseo" | "googleJson" | "serpapi" | "serper") {
     setSettingsBusy(true);
 
     try {
       const data = await requestJson<{ settings: LocalSettings }>("/api/settings", {
         body: JSON.stringify({
+          clearDataForSeoCredentials: type === "dataforseo",
           clearGoogleServiceAccountJson: type === "googleJson",
+          clearSerpApiKey: type === "serpapi",
           clearSerperApiKey: type === "serper"
         }),
         method: "POST"
       });
-      setSettings(data.settings);
+      hydrateSettings(data.settings);
       setNotice({ text: "Setting cleared.", tone: "ok" });
     } catch (error) {
       setNotice({ text: getErrorMessage(error), tone: "error" });
@@ -166,13 +188,33 @@ export function Dashboard() {
     }
   }
 
+  function hydrateSettings(nextSettings: LocalSettings) {
+    setSettings(nextSettings);
+    setSettingsForm({
+      checkProvider: nextSettings.checkProvider,
+      dataForSeoLanguageCode: nextSettings.dataForSeoLanguageCode || "pl",
+      dataForSeoLocationCode: nextSettings.dataForSeoLocationCode || "",
+      dataForSeoLocationName: nextSettings.dataForSeoLocationName || "",
+      dataForSeoLogin: "",
+      dataForSeoPassword: "",
+      googleServiceAccountFile: nextSettings.googleServiceAccountFile || "",
+      googleServiceAccountJson: "",
+      gscLanguageCode: nextSettings.gscLanguageCode || "pl-PL",
+      searxngBaseUrl: nextSettings.searxngBaseUrl || "",
+      searxngEngines: nextSettings.searxngEngines || "google",
+      serpApiKey: "",
+      serpQueryStrategy: nextSettings.serpQueryStrategy,
+      serperApiKey: ""
+    });
+  }
+
   function exportCsv() {
     if (!result) {
       return;
     }
 
     const csv = toCsv([
-      ["url", "status", "source", "checked_at", "lastmod", "detail", "error"],
+      ["url", "status", "provider", "checked_at", "lastmod", "detail", "error"],
       ...result.rows.map((row) => [
         row.url,
         row.status,
@@ -211,7 +253,7 @@ export function Dashboard() {
       <header className="topbar">
         <div>
           <h1>Index Checker</h1>
-          <p>{result ? `${result.summary.total} URLs checked` : "Database-free MVP for sitemap checks"}</p>
+          <p>{result ? `${result.summary.total} URLs checked` : "Database-free sitemap checker with pluggable providers"}</p>
         </div>
         <div className="topbar-actions">
           <button className="button secondary" onClick={openSettings} type="button">
@@ -237,75 +279,270 @@ export function Dashboard() {
               <h2>Settings</h2>
             </div>
             <div className="settings-overview">
-              <StatusPill tone={settings?.hasSerperApiKey ? "ok" : "muted"}>
-                {settings?.hasSerperApiKey ? `Serper: ${settings.serperApiKeyHint}` : "Serper: missing"}
+              <StatusPill tone={settings?.resolvedProvider ? "ok" : "warn"}>
+                {settings?.resolvedProvider ? `Active: ${PROVIDER_LABELS[settings.resolvedProvider]}` : "Active: not ready"}
               </StatusPill>
-              <StatusPill tone={settings?.hasGoogleServiceAccountJson || settings?.hasGoogleServiceAccountFile ? "ok" : "muted"}>
-                {settings?.hasGoogleServiceAccountJson || settings?.hasGoogleServiceAccountFile ? "GSC: configured" : "GSC: missing"}
+              <StatusPill tone="muted">
+                Mode: {PROVIDER_LABELS[(settings?.checkProvider || "AUTO") as keyof typeof PROVIDER_LABELS]}
+              </StatusPill>
+              <StatusPill tone="muted">
+                Strategy: {SERP_QUERY_STRATEGY_LABELS[(settings?.serpQueryStrategy || "SITE_THEN_URL") as keyof typeof SERP_QUERY_STRATEGY_LABELS]}
               </StatusPill>
             </div>
-            {(showSettings || !settings?.hasSerperApiKey && !settings?.hasGoogleServiceAccountJson && !settings?.hasGoogleServiceAccountFile) ? (
+            <div className="helper-box compact">
+              {settings?.resolvedProvider
+                ? `Current configuration will run checks through ${PROVIDER_LABELS[settings.resolvedProvider]}.`
+                : settings?.resolvedProviderError || "Configure at least one provider to enable checks."}
+            </div>
+            {!!configuredProviderLabels.length ? (
+              <div className="provider-list">
+                {configuredProviderLabels.map((label) => (
+                  <StatusPill key={label} tone="ok">
+                    {label}
+                  </StatusPill>
+                ))}
+              </div>
+            ) : null}
+            {showSettings || !settings?.resolvedProvider ? (
               <form className="project-form" onSubmit={saveSettings}>
-                <label>
-                  Serper API key
-                  <input
-                    onChange={(event) => setSettingsForm({ ...settingsForm, serperApiKey: event.target.value })}
-                    placeholder={settings?.hasSerperApiKey ? "Configured - enter a new key to replace it" : "Paste Serper API key"}
-                    value={settingsForm.serperApiKey}
-                  />
-                </label>
-                <div className="settings-actions-row">
-                  <button
-                    className="button secondary"
-                    disabled={!settings?.hasSerperApiKey || settingsBusy}
-                    onClick={() => void clearSetting("serper")}
-                    type="button"
-                  >
-                    Clear Serper
-                  </button>
+                <div className="settings-section">
+                  <div className="settings-section-header">
+                    <h3>Execution</h3>
+                    <p>Pick the provider mode and SERP query behavior.</p>
+                  </div>
+                  <div className="inline-fields">
+                    <label>
+                      Provider mode
+                      <select
+                        onChange={(event) => setSettingsForm({ ...settingsForm, checkProvider: event.target.value })}
+                        value={settingsForm.checkProvider}
+                      >
+                        {CHECK_PROVIDER_VALUES.map((provider) => (
+                          <option key={provider} value={provider}>
+                            {PROVIDER_LABELS[provider]}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      SERP query strategy
+                      <select
+                        onChange={(event) =>
+                          setSettingsForm({ ...settingsForm, serpQueryStrategy: event.target.value })
+                        }
+                        value={settingsForm.serpQueryStrategy}
+                      >
+                        {SERP_QUERY_STRATEGY_VALUES.map((strategy) => (
+                          <option key={strategy} value={strategy}>
+                            {SERP_QUERY_STRATEGY_LABELS[strategy]}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+                  <div className="helper-box compact">
+                    Site-then-URL first asks the SERP for site:&lt;url&gt;, then retries with the raw URL if the exact result is still missing.
+                  </div>
                 </div>
 
-                <label>
-                  Google service account file
-                  <input
-                    onChange={(event) => setSettingsForm({ ...settingsForm, googleServiceAccountFile: event.target.value })}
-                    placeholder="C:\\path\\to\\service-account.json"
-                    value={settingsForm.googleServiceAccountFile}
-                  />
-                </label>
-
-                <label>
-                  Google service account JSON
-                  <textarea
-                    className="textarea"
-                    onChange={(event) => setSettingsForm({ ...settingsForm, googleServiceAccountJson: event.target.value })}
-                    placeholder="Paste service account JSON if you do not want to use a file path"
-                    value={settingsForm.googleServiceAccountJson}
-                  />
-                </label>
-                <div className="settings-actions-row">
-                  <button
-                    className="button secondary"
-                    disabled={!settings?.hasGoogleServiceAccountJson || settingsBusy}
-                    onClick={() => void clearSetting("googleJson")}
-                    type="button"
-                  >
-                    Clear inline GSC JSON
-                  </button>
+                <div className="settings-section">
+                  <div className="settings-section-header">
+                    <h3>Google Search Console</h3>
+                    <p>Best signal for owned domains. Requires a service account added in Search Console.</p>
+                  </div>
+                  <label>
+                    Google service account file
+                    <input
+                      onChange={(event) =>
+                        setSettingsForm({ ...settingsForm, googleServiceAccountFile: event.target.value })
+                      }
+                      placeholder="C:\\path\\to\\service-account.json"
+                      value={settingsForm.googleServiceAccountFile}
+                    />
+                  </label>
+                  <label>
+                    Google service account JSON
+                    <textarea
+                      onChange={(event) =>
+                        setSettingsForm({ ...settingsForm, googleServiceAccountJson: event.target.value })
+                      }
+                      placeholder="Paste service account JSON if you do not want to use a file path"
+                      value={settingsForm.googleServiceAccountJson}
+                    />
+                  </label>
+                  <div className="settings-actions-row">
+                    <button
+                      className="button secondary"
+                      disabled={!settings?.hasGoogleServiceAccountJson || settingsBusy}
+                      onClick={() => void clearSetting("googleJson")}
+                      type="button"
+                    >
+                      Clear inline GSC JSON
+                    </button>
+                  </div>
+                  <label>
+                    GSC language code
+                    <input
+                      onChange={(event) => setSettingsForm({ ...settingsForm, gscLanguageCode: event.target.value })}
+                      placeholder="pl-PL"
+                      value={settingsForm.gscLanguageCode}
+                    />
+                  </label>
                 </div>
 
-                <label>
-                  GSC language code
-                  <input
-                    onChange={(event) => setSettingsForm({ ...settingsForm, gscLanguageCode: event.target.value })}
-                    placeholder="pl-PL"
-                    value={settingsForm.gscLanguageCode}
-                  />
-                </label>
+                <div className="settings-section">
+                  <div className="settings-section-header">
+                    <h3>Managed SERP APIs</h3>
+                    <p>Fast hosted providers when GSC is unavailable or you want visibility checks from SERP.</p>
+                  </div>
+                  <label>
+                    Serper API key
+                    <input
+                      onChange={(event) => setSettingsForm({ ...settingsForm, serperApiKey: event.target.value })}
+                      placeholder={
+                        settings?.hasSerperApiKey ? "Configured - enter a new key to replace it" : "Paste Serper API key"
+                      }
+                      value={settingsForm.serperApiKey}
+                    />
+                    <span className="form-hint">
+                      {settings?.serperApiKeyHint ? `Current: ${settings.serperApiKeyHint}` : "No Serper key saved yet."}
+                    </span>
+                  </label>
+                  <div className="settings-actions-row">
+                    <button
+                      className="button secondary"
+                      disabled={!settings?.hasSerperApiKey || settingsBusy}
+                      onClick={() => void clearSetting("serper")}
+                      type="button"
+                    >
+                      Clear Serper
+                    </button>
+                  </div>
 
-                <div className="helper-box">
-                  Use GSC for the most reliable indexing status. If GSC credentials are missing, the app falls back to Serper.
+                  <label>
+                    SerpApi key
+                    <input
+                      onChange={(event) => setSettingsForm({ ...settingsForm, serpApiKey: event.target.value })}
+                      placeholder={
+                        settings?.hasSerpApiKey ? "Configured - enter a new key to replace it" : "Paste SerpApi key"
+                      }
+                      value={settingsForm.serpApiKey}
+                    />
+                    <span className="form-hint">
+                      {settings?.serpApiKeyHint ? `Current: ${settings.serpApiKeyHint}` : "No SerpApi key saved yet."}
+                    </span>
+                  </label>
+                  <div className="settings-actions-row">
+                    <button
+                      className="button secondary"
+                      disabled={!settings?.hasSerpApiKey || settingsBusy}
+                      onClick={() => void clearSetting("serpapi")}
+                      type="button"
+                    >
+                      Clear SerpApi
+                    </button>
+                  </div>
+
+                  <div className="settings-subgrid">
+                    <label>
+                      DataForSEO login
+                      <input
+                        onChange={(event) => setSettingsForm({ ...settingsForm, dataForSeoLogin: event.target.value })}
+                        placeholder={
+                          settings?.hasDataForSeoCredentials
+                            ? "Configured - enter a new login to replace it"
+                            : "DataForSEO API login"
+                        }
+                        value={settingsForm.dataForSeoLogin}
+                      />
+                      <span className="form-hint">
+                        {settings?.dataForSeoLoginHint
+                          ? `Current: ${settings.dataForSeoLoginHint}`
+                          : "No DataForSEO login saved yet."}
+                      </span>
+                    </label>
+                    <label>
+                      DataForSEO password
+                      <input
+                        onChange={(event) =>
+                          setSettingsForm({ ...settingsForm, dataForSeoPassword: event.target.value })
+                        }
+                        placeholder="DataForSEO API password"
+                        type="password"
+                        value={settingsForm.dataForSeoPassword}
+                      />
+                    </label>
+                  </div>
+                  <div className="settings-subgrid settings-subgrid-3">
+                    <label>
+                      DataForSEO location code
+                      <input
+                        onChange={(event) =>
+                          setSettingsForm({ ...settingsForm, dataForSeoLocationCode: event.target.value })
+                        }
+                        placeholder="Optional numeric code"
+                        value={settingsForm.dataForSeoLocationCode}
+                      />
+                    </label>
+                    <label>
+                      DataForSEO location name
+                      <input
+                        onChange={(event) =>
+                          setSettingsForm({ ...settingsForm, dataForSeoLocationName: event.target.value })
+                        }
+                        placeholder="Optional, e.g. Warsaw,Mazowieckie,Poland"
+                        value={settingsForm.dataForSeoLocationName}
+                      />
+                    </label>
+                    <label>
+                      DataForSEO language code
+                      <input
+                        onChange={(event) =>
+                          setSettingsForm({ ...settingsForm, dataForSeoLanguageCode: event.target.value })
+                        }
+                        placeholder="pl"
+                        value={settingsForm.dataForSeoLanguageCode}
+                      />
+                    </label>
+                  </div>
+                  <div className="settings-actions-row">
+                    <button
+                      className="button secondary"
+                      disabled={!settings?.hasDataForSeoCredentials || settingsBusy}
+                      onClick={() => void clearSetting("dataforseo")}
+                      type="button"
+                    >
+                      Clear DataForSEO login and password
+                    </button>
+                  </div>
                 </div>
+
+                <div className="settings-section">
+                  <div className="settings-section-header">
+                    <h3>Open-source / self-hosted</h3>
+                    <p>Use SearXNG if you have your own instance or a trusted public one with JSON enabled.</p>
+                  </div>
+                  <label>
+                    SearXNG base URL
+                    <input
+                      onChange={(event) => setSettingsForm({ ...settingsForm, searxngBaseUrl: event.target.value })}
+                      placeholder="https://your-searxng-instance.example"
+                      value={settingsForm.searxngBaseUrl}
+                    />
+                  </label>
+                  <label>
+                    SearXNG engines
+                    <input
+                      onChange={(event) => setSettingsForm({ ...settingsForm, searxngEngines: event.target.value })}
+                      placeholder="google"
+                      value={settingsForm.searxngEngines}
+                    />
+                    <span className="form-hint">
+                      Leave blank to use the instance default. Google is a common engine choice if the instance exposes it.
+                    </span>
+                  </label>
+                </div>
+
                 <button className="button primary" disabled={settingsBusy} type="submit">
                   <Settings2 size={16} />
                   {settingsBusy ? "Saving..." : "Save settings"}
@@ -372,11 +609,9 @@ export function Dashboard() {
                 </label>
               </div>
               <div className="helper-box">
-                {settings?.hasGoogleServiceAccountJson || settings?.hasGoogleServiceAccountFile
-                  ? "GSC is configured, so checks will use Google Search Console."
-                  : settings?.hasSerperApiKey
-                    ? "GSC is not configured, so checks will use Serper."
-                    : "Configure GSC or Serper in Settings before running the check."}
+                {settings?.resolvedProvider
+                  ? `${PROVIDER_LABELS[settings.resolvedProvider]} is ready. Current mode: ${PROVIDER_LABELS[settings.checkProvider]}.`
+                  : settings?.resolvedProviderError || "Configure a provider in Settings before running the check."}
               </div>
               <button className="button primary" disabled={busy} type="submit">
                 <Play size={16} />
@@ -412,8 +647,8 @@ export function Dashboard() {
                 <strong>{result?.summary.errors ?? 0}</strong>
               </div>
               <div className="summary-card">
-                <span>Source</span>
-                <strong>{result?.source ?? "-"}</strong>
+                <span>Provider</span>
+                <strong>{result ? PROVIDER_LABELS[result.source] : "-"}</strong>
               </div>
             </div>
           </section>
@@ -460,7 +695,7 @@ export function Dashboard() {
                 <tr>
                   <th>URL</th>
                   <th>Status</th>
-                  <th>Source</th>
+                  <th>Provider</th>
                   <th>Checked</th>
                   <th>Detail</th>
                   <th>Error</th>
@@ -477,7 +712,7 @@ export function Dashboard() {
                     <td>
                       <StatusPill tone={statusTone(row.status)}>{formatStatus(row.status)}</StatusPill>
                     </td>
-                    <td>{row.source}</td>
+                    <td>{PROVIDER_LABELS[row.source]}</td>
                     <td>{new Date(row.checkedAt).toLocaleString("pl-PL")}</td>
                     <td className="detail-cell">{row.detail || "-"}</td>
                     <td className="error-cell">{row.error || ""}</td>
@@ -581,5 +816,13 @@ function getErrorMessage(error: unknown): string {
 }
 
 function isConfigurationError(message: string) {
-  return message.includes("SERPER_API_KEY") || message.includes("Google service account");
+  return (
+    message.includes("SERPER_API_KEY") ||
+    message.includes("SERPAPI_API_KEY") ||
+    message.includes("DATAFORSEO_") ||
+    message.includes("SEARXNG_BASE_URL") ||
+    message.includes("Google Search Console") ||
+    message.includes("selected in Settings") ||
+    message.includes("Configure")
+  );
 }

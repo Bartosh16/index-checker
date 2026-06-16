@@ -31,6 +31,7 @@ body {
 
 button,
 input,
+select,
 textarea {
   font: inherit;
 }
@@ -138,7 +139,8 @@ label {
   font-weight: 600;
 }
 
-input {
+input,
+select {
   width: 100%;
   min-height: 38px;
   border: 1px solid var(--border);
@@ -162,6 +164,7 @@ textarea {
 }
 
 input:focus,
+select:focus,
 textarea:focus {
   border-color: var(--focus);
   box-shadow: 0 0 0 3px rgba(116, 169, 255, 0.22);
@@ -193,6 +196,10 @@ textarea:focus {
   line-height: 1.45;
 }
 
+.helper-box.compact {
+  padding: 8px 10px;
+}
+
 .settings-overview {
   display: flex;
   gap: 8px;
@@ -204,6 +211,51 @@ textarea:focus {
   display: flex;
   justify-content: flex-end;
   margin-top: -4px;
+}
+
+.settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-top: 2px;
+}
+
+.settings-section + .settings-section {
+  border-top: 1px solid var(--border);
+  padding-top: 14px;
+}
+
+.settings-section-header h3,
+.settings-section-header p {
+  margin: 0;
+}
+
+.settings-section-header h3 {
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.settings-section-header p {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 4px;
+}
+
+.settings-subgrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.settings-subgrid-3 {
+  grid-template-columns: 1fr 1fr 1fr;
+}
+
+.provider-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
 }
 
 .button {
@@ -527,6 +579,8 @@ th {
   }
 
   .inline-fields-3,
+  .settings-subgrid,
+  .settings-subgrid-3,
   .summary-grid {
     grid-template-columns: 1fr;
   }

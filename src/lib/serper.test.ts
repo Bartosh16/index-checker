@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { findExactSerpMatch } from "@/lib/serper";
+import { buildSerpQueries } from "@/lib/check-providers";
+import { findExactSerpMatch } from "@/lib/serp-utils";
 
 describe("findExactSerpMatch", () => {
   it("matches the exact normalized URL", () => {
@@ -17,5 +18,12 @@ describe("findExactSerpMatch", () => {
     ]);
 
     expect(match).toBeNull();
+  });
+
+  it("builds a raw URL fallback when the strategy asks for it", () => {
+    expect(buildSerpQueries("https://example.com/post", "SITE_THEN_URL")).toEqual([
+      "site:https://example.com/post",
+      "https://example.com/post"
+    ]);
   });
 });

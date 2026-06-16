@@ -1,10 +1,21 @@
+import {
+  ActiveCheckProvider,
+  getConfiguredProviders,
+  normalizeCheckProvider,
+  normalizeSerpQueryStrategy,
+  resolveConfiguredProvider,
+  SerpCheckOutcome
+} from "@/lib/check-providers";
+import { checkDataForSeoVisibility } from "@/lib/dataforseo";
 import { inspectGoogleIndex } from "@/lib/gsc";
+import { checkSearxngVisibility } from "@/lib/searxng";
+import { checkSerpApiVisibility } from "@/lib/serpapi";
 import { checkSerpVisibility } from "@/lib/serper";
 import { collectSitemapUrls } from "@/lib/sitemap";
 import { getIntegerEnv, getOptionalEnv } from "@/lib/env";
 import { inferGscPropertyUrl, normalizeDomain } from "@/lib/url";
 
-export type IndexCheckSource = "GSC" | "SERP";
+export type IndexCheckSource = ActiveCheckProvider;
 export type IndexStatus = "INDEXED" | "NOT_INDEXED" | "UNKNOWN" | "ERROR";
 
 export type SitemapCheckRow = {
@@ -57,8 +68,9 @@ export async function runSitemapCheck(input: RunSitemapCheckInput): Promise<Site
     throw new Error("Could not infer the domain from the provided sitemap URL.");
   }
 
-  const source = resolveCheckSource();
+  const source = resolveCheckProvider();
   const gscPropertyUrl = source === "GSC" ? normalizeGscProperty(input.gscPropertyUrl, domain) : null;
+  const serpQueryStrategy = resolveSerpQueryStrategy();
   const urls = await collectSitemapUrls(sitemapUrl, domain);
   const batchSize = normalizeBatchSize(input.batchSize);
   const rows = await mapWithConcurrency(urls, batchSize, async (entry) => {
@@ -75,14 +87,15 @@ export async function runSitemapCheck(input: RunSitemapCheckInput): Promise<Site
       } satisfies SitemapCheckRow;
     }
 
-    const serp = await checkSerpVisibility(entry.loc, {
+    const serp = await runSerpProvider(source, entry.loc, {
       gl: input.serperGl?.trim() || "pl",
-      hl: input.serperHl?.trim() || "pl"
+      hl: input.serperHl?.trim() || "pl",
+      strategy: serpQueryStrategy
     });
 
     return {
       checkedAt: new Date().toISOString(),
-      detail: serp.matchedUrl || serp.query,
+      detail: serp.matchedUrl || serp.queryAttempts.join(" -> "),
       error: serp.error,
       lastmod: entry.lastmod?.toISOString() ?? null,
       source,
@@ -101,20 +114,22 @@ export async function runSitemapCheck(input: RunSitemapCheckInput): Promise<Site
   };
 }
 
-export function resolveCheckSource(): IndexCheckSource {
-  const hasGoogleCredentials = Boolean(
-    getOptionalEnv("GOOGLE_SERVICE_ACCOUNT_JSON") || getOptionalEnv("GOOGLE_SERVICE_ACCOUNT_FILE")
-  );
-  const hasSerperKey = Boolean(getOptionalEnv("SERPER_API_KEY"));
+export function resolveCheckProvider(): IndexCheckSource {
+  const configuredProviders = getConfiguredProviders(process.env);
+  const setting = normalizeCheckProvider(getOptionalEnv("CHECK_PROVIDER"));
+  const resolved = resolveConfiguredProvider(setting, configuredProviders);
 
-  if (hasGoogleCredentials) {
-    return "GSC";
-  }
-  if (hasSerperKey) {
-    return "SERP";
+  if (!resolved.provider || resolved.error) {
+    throw new Error(resolved.error || "No check provider is configured.");
   }
 
-  throw new Error("Configure Google service account credentials or SERPER_API_KEY before running a check.");
+  return resolved.provider;
+}
+
+export const resolveCheckSource = resolveCheckProvider;
+
+export function resolveSerpQueryStrategy() {
+  return normalizeSerpQueryStrategy(getOptionalEnv("SERP_QUERY_STRATEGY"));
 }
 
 function normalizeGscProperty(value: string | undefined, domain: string): string {
@@ -127,6 +142,23 @@ function normalizeBatchSize(value: number | undefined): number {
   const fallback = getIntegerEnv("CHECK_BATCH_SIZE", DEFAULT_BATCH_SIZE);
   const parsed = value && Number.isFinite(value) ? Math.trunc(value) : fallback;
   return Math.max(1, Math.min(parsed, MAX_BATCH_SIZE));
+}
+
+async function runSerpProvider(
+  source: Exclude<IndexCheckSource, "GSC">,
+  url: string,
+  options: { gl: string; hl: string; strategy: ReturnType<typeof resolveSerpQueryStrategy> }
+): Promise<SerpCheckOutcome> {
+  if (source === "SERPER") {
+    return checkSerpVisibility(url, options);
+  }
+  if (source === "DATAFORSEO") {
+    return checkDataForSeoVisibility(url, options);
+  }
+  if (source === "SERPAPI") {
+    return checkSerpApiVisibility(url, options);
+  }
+  return checkSearxngVisibility(url, { strategy: options.strategy });
 }
 
 function mapGscOutcome(status: string): IndexStatus {

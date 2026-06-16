@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
-import { GscStatus } from "@prisma/client";
 import { GoogleAuth } from "google-auth-library";
+import { GscCheckStatus } from "@/lib/check-providers";
 import { getOptionalEnv } from "@/lib/env";
 
 type GscIndexStatusResult = {
@@ -21,7 +21,7 @@ type GscInspectResponse = {
 };
 
 export type GscCheckOutcome = {
-  status: GscStatus;
+  status: GscCheckStatus;
   verdict: string | null;
   coverageState: string | null;
   indexingState: string | null;
@@ -55,7 +55,7 @@ export async function inspectGoogleIndex(inspectionUrl: string, siteUrl: string)
     const indexStatus = response.data.inspectionResult?.indexStatusResult;
     if (!indexStatus) {
       return {
-        status: GscStatus.UNKNOWN,
+        status: "UNKNOWN",
         verdict: null,
         coverageState: null,
         indexingState: null,
@@ -76,7 +76,7 @@ export async function inspectGoogleIndex(inspectionUrl: string, siteUrl: string)
     };
   } catch (error) {
     return {
-      status: GscStatus.ERROR,
+      status: "ERROR",
       verdict: null,
       coverageState: null,
       indexingState: null,
@@ -101,14 +101,14 @@ async function loadGoogleCredentials(): Promise<Record<string, unknown> | null> 
   return null;
 }
 
-function mapGscVerdict(verdict: string | undefined): GscStatus {
+function mapGscVerdict(verdict: string | undefined): GscCheckStatus {
   if (verdict === "PASS") {
-    return GscStatus.PASS;
+    return "PASS";
   }
   if (verdict === "FAIL") {
-    return GscStatus.FAIL;
+    return "FAIL";
   }
-  return GscStatus.UNKNOWN;
+  return "UNKNOWN";
 }
 
 function parseDate(value: string | undefined): Date | null {
@@ -122,7 +122,7 @@ function parseDate(value: string | undefined): Date | null {
 
 function skipped(error: string): GscCheckOutcome {
   return {
-    status: GscStatus.SKIPPED,
+    status: "SKIPPED",
     verdict: null,
     coverageState: null,
     indexingState: null,

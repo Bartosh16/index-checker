@@ -1,4 +1,5 @@
 import { CheckSource, GscStatus, RunStatus, SerpStatus } from "@prisma/client";
+import { normalizeSerpQueryStrategy } from "@/lib/check-providers";
 import { getIntegerEnv } from "@/lib/env";
 import { inspectGoogleIndex } from "@/lib/gsc";
 import { prisma } from "@/lib/prisma";
@@ -125,7 +126,8 @@ async function buildResultForUrl(input: {
     inspectGoogleIndex(input.url, input.gscPropertyUrl),
     checkSerpVisibility(input.url, {
       hl: input.serperHl,
-      gl: input.serperGl
+      gl: input.serperGl,
+      strategy: normalizeSerpQueryStrategy(process.env.SERP_QUERY_STRATEGY)
     })
   ]);
 
@@ -135,14 +137,14 @@ async function buildResultForUrl(input: {
     runId: input.runId,
     source: CheckSource.LIVE,
     checkedAt: new Date(),
-    gscStatus: gsc.status,
+    gscStatus: gsc.status as GscStatus,
     gscVerdict: gsc.verdict,
     gscCoverageState: gsc.coverageState,
     gscIndexingState: gsc.indexingState,
     gscRobotsTxtState: gsc.robotsTxtState,
     gscLastCrawlTime: gsc.lastCrawlTime,
     gscError: gsc.error,
-    serpStatus: serp.status,
+    serpStatus: serp.status as SerpStatus,
     serpVisible: serp.visible,
     serpQuery: serp.query,
     serpMatchedUrl: serp.matchedUrl,

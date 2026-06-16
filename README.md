@@ -1,42 +1,221 @@
 # Index Checker
 
-Next.js app for checking owned-domain URLs from XML sitemaps.
+Batch checker for URLs pulled from XML sitemaps.
 
-## Setup
+Current branch is intentionally database-free in the core flow:
 
-1. Copy `.env.example` to `.env`.
-2. Set either `GOOGLE_SERVICE_ACCOUNT_JSON` or `GOOGLE_SERVICE_ACCOUNT_FILE` for GSC checks.
-3. Or set `SERPER_API_KEY` for SERP-based fallback checks.
-4. Add the Google service account as a user on the matching Search Console property if you use GSC.
+- import URLs from a sitemap or sitemap index
+- check indexing / visibility one URL at a time
+- show results immediately in the UI
+- export CSV
+- keep provider configuration in local `.env`
 
-## Commands
+That makes the app usable even when Postgres is unavailable or unwanted. A database can be added later as an optional persistence layer without blocking the checker itself.
 
-```bash
-npm install
-npm run db:generate
-npm run db:migrate
-npm run dev
-```
+## What it checks today
 
-Database is optional in the current MVP. If you still want local Postgres:
+One run uses one active provider at a time:
 
-```bash
-docker compose up -d
-npm run db:push
-npm run dev
-```
+- `Google Search Console`
+- `Serper`
+- `SerpApi`
+- `DataForSEO`
+- `SearXNG`
 
-On Windows you can also use:
+Supported modes:
+
+- `AUTO` - first configured provider wins
+- forced provider mode - use exactly the provider selected in Settings
+
+For SERP-based providers you can choose the query strategy:
+
+- `SITE_ONLY` - only `site:<full-url>`
+- `SITE_THEN_URL` - first `site:<full-url>`, then retry with the raw URL
+
+The result is treated as a hit only when the normalized result URL exactly matches the checked URL. Similar URLs are not counted as indexed.
+
+## Why no DB in the main flow
+
+Earlier iterations used Prisma + Postgres for projects, runs and cached results. In practice that created friction before the core checker was even usable.
+
+So the current architecture is:
+
+- core checker: no database required
+- settings: stored in local `.env`
+- output: immediate table + CSV
+- future persistence: optional, not required for running checks
+
+This keeps database interference non-critical by design.
+
+## Requirements
+
+- Node.js 22+
+- npm
+- optional: Docker Desktop if you want to experiment with Postgres later
+
+## Quick start
+
+### Windows
 
 ```bat
 install.bat
 start.bat
 ```
 
-## Notes
+`start.bat` starts the dev server and opens the app automatically in your browser.
 
-- Configure Serper or GSC directly in the in-app `Settings` panel. Settings are stored locally in `.env`.
-- GSC uses the URL Inspection API with `webmasters.readonly`.
-- GSC property can be left empty in the UI. The app will default to `sc-domain:<domain>`.
-- If GSC credentials are not configured, the app falls back to Serper and checks `site:<full URL>`.
-- The current MVP runs one sitemap check and lets you export the results directly to CSV without storing anything in a database.
+### Manual
+
+```bash
+npm install
+npm run dev
+```
+
+Open [http://127.0.0.1:3001](http://127.0.0.1:3001) if you use the bundled Windows start script defaults.
+
+## Configuration
+
+You can configure everything from the in-app `Settings` panel. The UI writes to `.env`.
+
+### Core settings
+
+```env
+CHECK_PROVIDER="AUTO"
+SERP_QUERY_STRATEGY="SITE_THEN_URL"
+CHECK_BATCH_SIZE="25"
+CHECK_CACHE_DAYS="7"
+```
+
+### Google Search Console
+
+Use one of:
+
+```env
+GOOGLE_SERVICE_ACCOUNT_JSON=""
+GOOGLE_SERVICE_ACCOUNT_FILE=""
+GSC_LANGUAGE_CODE="pl-PL"
+```
+
+Notes:
+
+- the service account must be added to the relevant Search Console property
+- the app can infer a default property like `sc-domain:example.com`
+- GSC property ownership cannot be reliably discovered from page source alone, so this still comes from Search Console configuration
+
+### Serper
+
+```env
+SERPER_API_KEY=""
+```
+
+### SerpApi
+
+```env
+SERPAPI_API_KEY=""
+```
+
+### DataForSEO
+
+At minimum:
+
+```env
+DATAFORSEO_LOGIN=""
+DATAFORSEO_PASSWORD=""
+DATAFORSEO_LOCATION_CODE=""
+DATAFORSEO_LOCATION_NAME=""
+DATAFORSEO_LANGUAGE_CODE="pl"
+```
+
+Use either `DATAFORSEO_LOCATION_CODE` or `DATAFORSEO_LOCATION_NAME`.
+
+### SearXNG
+
+```env
+SEARXNG_BASE_URL=""
+SEARXNG_ENGINES="google"
+```
+
+Example:
+
+```env
+SEARXNG_BASE_URL="https://your-searxng.example"
+SEARXNG_ENGINES="google"
+```
+
+Some public SearXNG instances disable JSON or do not expose Google, so this option works best with your own instance or a trusted one.
+
+## How the checker works
+
+1. Fetch the provided sitemap.
+2. Support both `urlset` and `sitemapindex`.
+3. Deduplicate normalized URLs.
+4. Ignore URLs outside the selected domain.
+5. Run checks with limited concurrency.
+6. Show live results in the table.
+7. Export the whole batch as CSV.
+
+No crawling beyond sitemap discovery happens in this branch.
+
+## UI overview
+
+- `Settings` panel for provider selection and credentials
+- `Run check` form for sitemap URL, domain, property, batch size, `hl`, `gl`
+- `Results` table with filters
+- `Export CSV`
+
+## Developer commands
+
+```bash
+npm run dev
+npm run lint
+npm run test
+npm run build
+```
+
+Legacy database scripts still exist for future work:
+
+```bash
+npm run db:generate
+npm run db:migrate
+npm run db:push
+npm run db:studio
+```
+
+They are not required for the current MVP flow.
+
+## Notes on provider choice
+
+Recommended starting order:
+
+1. `Google Search Console` for owned domains
+2. `Serper` for lightweight SERP checks
+3. `SerpApi` or `DataForSEO` when you want another paid SERP source
+4. `SearXNG` when you want a self-hosted / open-source option
+
+`AUTO` currently resolves providers in this order when they are configured:
+
+1. `Google Search Console`
+2. `Serper`
+3. `DataForSEO`
+4. `SerpApi`
+5. `SearXNG`
+
+If you want a different provider, force it in Settings.
+
+## Tests covered
+
+- sitemap parsing for `urlset`
+- sitemap index expansion
+- URL deduplication
+- ignoring off-domain URLs
+- exact URL match logic for SERP results
+- provider resolution
+- SERP query strategy fallback
+
+## Next sensible step
+
+Add persistence as a separate module, not as a prerequisite for the checker. The clean shape is:
+
+- checker runs without storage
+- optional storage adapter saves projects, runs, cache and history
+- the UI still works even if storage is disabled or broken
