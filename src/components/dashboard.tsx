@@ -1,6 +1,6 @@
 "use client";
 
-import { Download, FileSearch, Play, RefreshCcw, Settings2 } from "lucide-react";
+import { Download, FilePlus2, FileSearch, History, Moon, Play, RefreshCcw, Save, Settings2, Sun } from "lucide-react";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CHECK_PROVIDER_VALUES,
@@ -10,6 +10,7 @@ import {
 } from "@/lib/check-providers";
 import { toCsv } from "@/lib/csv";
 import type { LocalSettings } from "@/lib/local-settings";
+import type { SavedProject, SavedResultResponse, SavedRunMode, SavedRunSummary } from "@/lib/project-types";
 import type { IndexStatus, SitemapCheckResponse, SitemapCheckRow } from "@/lib/sitemap-check";
 
 type Notice = {
@@ -35,30 +36,54 @@ type SettingsForm = {
   serperApiKey: string;
 };
 
+type RunForm = {
+  batchSize: string;
+  domain: string;
+  gscPropertyUrl: string;
+  projectName: string;
+  serperGl: string;
+  serperHl: string;
+  sitemapUrl: string;
+};
+
+type SavedProjectsResponse = { projects: SavedProject[] };
+type SavedProjectResponse = { project: SavedProject };
+type SavedProjectDetailResponse = { project: SavedProject; runs: SavedRunSummary[] };
+type SavedRunResponse = { project: SavedProject; result: SavedResultResponse; run: SavedRunSummary };
+
 const filters = [
   { value: "all", label: "All" },
   { value: "indexed", label: "Indexed" },
   { value: "not-indexed", label: "Not indexed" },
+  { value: "changed", label: "Changed" },
   { value: "unknown", label: "Unknown" },
   { value: "errors", label: "Errors" }
 ] as const;
+
+const defaultRunForm = (): RunForm => ({
+  batchSize: "5",
+  domain: "",
+  gscPropertyUrl: "",
+  projectName: "",
+  serperGl: "pl",
+  serperHl: "pl",
+  sitemapUrl: ""
+});
 
 export function Dashboard() {
   const [busy, setBusy] = useState(false);
   const [filter, setFilter] = useState<(typeof filters)[number]["value"]>("all");
   const [notice, setNotice] = useState<Notice | null>(null);
-  const [result, setResult] = useState<SitemapCheckResponse | null>(null);
+  const [projects, setProjects] = useState<SavedProject[]>([]);
+  const [result, setResult] = useState<SavedResultResponse | SitemapCheckResponse | null>(null);
+  const [runForm, setRunForm] = useState<RunForm>(defaultRunForm);
+  const [runHistory, setRunHistory] = useState<SavedRunSummary[]>([]);
+  const [runMode, setRunMode] = useState<SavedRunMode>("ALL_URLS");
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [settings, setSettings] = useState<LocalSettings | null>(null);
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  const [form, setForm] = useState({
-    batchSize: "5",
-    domain: "",
-    gscPropertyUrl: "",
-    serperGl: "pl",
-    serperHl: "pl",
-    sitemapUrl: ""
-  });
+  const [theme, setTheme] = useState<"light" | "dark">("light");
   const [settingsForm, setSettingsForm] = useState<SettingsForm>({
     checkProvider: "AUTO",
     dataForSeoLanguageCode: "pl",
@@ -88,12 +113,24 @@ export function Dashboard() {
   }, []);
 
   useEffect(() => {
-    void loadSettings();
-  }, [loadSettings]);
+    const stored = window.localStorage.getItem("index-checker-theme");
+    const nextTheme =
+      stored === "dark" || stored === "light"
+        ? stored
+        : window.matchMedia("(prefers-color-scheme: dark)").matches
+          ? "dark"
+          : "light";
+    setTheme(nextTheme);
+  }, []);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    window.localStorage.setItem("index-checker-theme", theme);
+  }, [theme]);
 
   const inferredGscProperty = useMemo(
-    () => inferGscPropertyFromForm(form.domain, form.sitemapUrl),
-    [form.domain, form.sitemapUrl]
+    () => inferGscPropertyFromForm(runForm.domain, runForm.sitemapUrl),
+    [runForm.domain, runForm.sitemapUrl]
   );
 
   const filteredRows = useMemo(() => {
@@ -109,27 +146,157 @@ export function Dashboard() {
     [settings]
   );
 
+  const selectedProject = useMemo(
+    () => projects.find((project) => project.id === selectedProjectId) ?? null,
+    [projects, selectedProjectId]
+  );
+
+  const loadSavedRun = useCallback(async (projectId: string, runId: string, showNotice = true) => {
+    const data = await requestJson<SavedRunResponse>(`/api/local-projects/${projectId}/runs/${runId}`);
+    setResult(data.result);
+    if (showNotice) {
+      setNotice({
+        text: `Loaded saved run from ${new Date(data.run.completedAt).toLocaleString("pl-PL")}.`,
+        tone: "info"
+      });
+    }
+  }, []);
+
+  const loadProject = useCallback(
+    async (projectId: string, loadLatestRun = true) => {
+      const data = await requestJson<SavedProjectDetailResponse>(`/api/local-projects/${projectId}`);
+      setSelectedProjectId(projectId);
+      hydrateProject(data.project);
+      setRunHistory(data.runs);
+
+      if (loadLatestRun && data.runs[0]) {
+        await loadSavedRun(projectId, data.runs[0].id, false);
+      } else if (!data.runs.length) {
+        setResult(null);
+      }
+    },
+    [loadSavedRun]
+  );
+
+  const loadProjects = useCallback(
+    async (preferredProjectId?: string | null) => {
+      try {
+        const data = await requestJson<SavedProjectsResponse>("/api/local-projects");
+        setProjects(data.projects);
+
+        const candidateId = preferredProjectId ?? null;
+        if (candidateId && data.projects.some((project) => project.id === candidateId)) {
+          await loadProject(candidateId, true);
+        } else if (data.projects[0]) {
+          await loadProject(data.projects[0].id, true);
+        } else {
+          setSelectedProjectId(null);
+          setRunHistory([]);
+        }
+      } catch (error) {
+        setNotice({ text: getErrorMessage(error), tone: "error" });
+      }
+    },
+    [loadProject]
+  );
+
+  useEffect(() => {
+    void loadSettings();
+    void loadProjects(null);
+  }, [loadProjects, loadSettings]);
+
+  async function maybePersistProject() {
+    if (!runForm.projectName.trim()) {
+      return null;
+    }
+
+    const payload = {
+      domain: runForm.domain,
+      gscPropertyUrl: runForm.gscPropertyUrl || inferredGscProperty,
+      id: selectedProjectId ?? undefined,
+      name: runForm.projectName,
+      serperGl: runForm.serperGl,
+      serperHl: runForm.serperHl,
+      sitemapUrl: runForm.sitemapUrl
+    };
+
+    const data = await requestJson<SavedProjectResponse>("/api/local-projects", {
+      body: JSON.stringify(payload),
+      method: "POST"
+    });
+
+    setSelectedProjectId(data.project.id);
+    setProjects((current) => upsertProject(current, data.project));
+    return data.project;
+  }
+
+  async function saveCurrentProject() {
+    try {
+      if (!runForm.projectName.trim()) {
+        setNotice({ text: "Add a project name before saving.", tone: "error" });
+        return;
+      }
+      if (!runForm.domain.trim() || !runForm.sitemapUrl.trim()) {
+        setNotice({ text: "Domain and sitemap URL are required to save a project.", tone: "error" });
+        return;
+      }
+
+      const project = await maybePersistProject();
+      if (project) {
+        await loadProject(project.id, false);
+        setNotice({ text: `Project "${project.name}" saved locally.`, tone: "ok" });
+      }
+    } catch (error) {
+      setNotice({ text: getErrorMessage(error), tone: "error" });
+    }
+  }
+
   async function runCheck(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setBusy(true);
     setNotice({ text: "Running sitemap check...", tone: "info" });
 
     try {
-      const data = await requestJson<SitemapCheckResponse>("/api/check-sitemap", {
-        body: JSON.stringify({
-          batchSize: Number.parseInt(form.batchSize, 10) || 5,
-          domain: form.domain,
-          gscPropertyUrl: form.gscPropertyUrl || inferredGscProperty,
-          serperGl: form.serperGl,
-          serperHl: form.serperHl,
-          sitemapUrl: form.sitemapUrl
-        }),
-        method: "POST"
-      });
+      let data: SitemapCheckResponse | SavedResultResponse;
+
+      if (selectedProjectId || runForm.projectName.trim()) {
+        const savedProject = await maybePersistProject();
+        if (!savedProject) {
+          throw new Error("Could not save the project before running the check.");
+        }
+
+        const runData = await requestJson<SavedRunResponse>(`/api/local-projects/${savedProject.id}/runs`, {
+          body: JSON.stringify({
+            batchSize: Number.parseInt(runForm.batchSize, 10) || 5,
+            mode: runMode
+          }),
+          method: "POST"
+        });
+
+        data = runData.result;
+        setRunHistory((current) => [runData.run, ...current.filter((run) => run.id !== runData.run.id)]);
+        setProjects((current) => upsertProject(current, runData.project));
+        setSelectedProjectId(runData.project.id);
+      } else {
+        data = await requestJson<SitemapCheckResponse>("/api/check-sitemap", {
+          body: JSON.stringify({
+            batchSize: Number.parseInt(runForm.batchSize, 10) || 5,
+            domain: runForm.domain,
+            gscPropertyUrl: runForm.gscPropertyUrl || inferredGscProperty,
+            serperGl: runForm.serperGl,
+            serperHl: runForm.serperHl,
+            sitemapUrl: runForm.sitemapUrl
+          }),
+          method: "POST"
+        });
+      }
 
       setResult(data);
       setNotice({
-        text: `Checked ${data.summary.total} URLs using ${PROVIDER_LABELS[data.source]}.`,
+        text:
+          "projectId" in data && data.projectId
+            ? `Saved run completed for ${data.projectName || data.domain}.`
+            : `Checked ${data.summary.total} URLs using ${PROVIDER_LABELS[data.source]}.`,
         tone: "ok"
       });
     } catch (error) {
@@ -188,6 +355,18 @@ export function Dashboard() {
     }
   }
 
+  function hydrateProject(project: SavedProject) {
+    setRunForm((current) => ({
+      ...current,
+      domain: project.domain,
+      gscPropertyUrl: project.gscPropertyUrl,
+      projectName: project.name,
+      serperGl: project.serperGl,
+      serperHl: project.serperHl,
+      sitemapUrl: project.sitemapUrl
+    }));
+  }
+
   function hydrateSettings(nextSettings: LocalSettings) {
     setSettings(nextSettings);
     setSettingsForm({
@@ -214,14 +393,17 @@ export function Dashboard() {
     }
 
     const csv = toCsv([
-      ["url", "status", "provider", "checked_at", "lastmod", "detail", "error"],
+      ["url", "status", "previous_status", "changed", "provider", "lookup", "detail", "checked_at", "lastmod", "error"],
       ...result.rows.map((row) => [
         row.url,
         row.status,
+        row.previousStatus || "",
+        row.changedSincePrevious ? "yes" : "no",
         row.source,
+        row.lookup || "",
+        row.detail || "",
         row.checkedAt,
         row.lastmod || "",
-        row.detail || "",
         row.error || ""
       ])
     ]);
@@ -241,6 +423,14 @@ export function Dashboard() {
     setFilter("all");
   }
 
+  function startNewProject() {
+    setSelectedProjectId(null);
+    setRunForm(defaultRunForm());
+    setRunHistory([]);
+    setResult(null);
+    setNotice({ text: "Started a fresh unsaved project.", tone: "info" });
+  }
+
   function openSettings() {
     setShowSettings(true);
     window.requestAnimationFrame(() => {
@@ -253,16 +443,28 @@ export function Dashboard() {
       <header className="topbar">
         <div>
           <h1>Index Checker</h1>
-          <p>{result ? `${result.summary.total} URLs checked` : "Database-free sitemap checker with pluggable providers"}</p>
+          <p>
+            {result
+              ? `${result.summary.total} URLs checked${"projectName" in result && result.projectName ? ` for ${result.projectName}` : ""}`
+              : "Projects, saved runs and pluggable providers without a mandatory database"}
+          </p>
         </div>
         <div className="topbar-actions">
+          <button className="button secondary" onClick={() => setTheme(theme === "dark" ? "light" : "dark")} type="button">
+            {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
+            {theme === "dark" ? "Light mode" : "Dark mode"}
+          </button>
           <button className="button secondary" onClick={openSettings} type="button">
             <Settings2 size={16} />
             Settings
           </button>
+          <button className="button secondary" onClick={startNewProject} type="button">
+            <FilePlus2 size={16} />
+            New project
+          </button>
           <button className="button secondary" onClick={resetRun} type="button">
             <RefreshCcw size={16} />
-            Reset
+            Reset result
           </button>
           <button className="button secondary" disabled={!result} onClick={exportCsv} type="button">
             <Download size={16} />
@@ -273,6 +475,147 @@ export function Dashboard() {
 
       <div className="workspace">
         <aside className="sidebar">
+          <section className="panel">
+            <div className="panel-heading">
+              <History size={18} />
+              <h2>Projects</h2>
+            </div>
+            <div className="project-list">
+              {projects.map((project) => (
+                <button
+                  key={project.id}
+                  className={project.id === selectedProjectId ? "project-row active" : "project-row"}
+                  onClick={() => void loadProject(project.id)}
+                  type="button"
+                >
+                  <span>{project.name}</span>
+                  <strong>{project.lastRunAt ? new Date(project.lastRunAt).toLocaleDateString("pl-PL") : "No runs yet"}</strong>
+                </button>
+              ))}
+              {!projects.length ? <div className="empty-helper">No saved projects yet.</div> : null}
+            </div>
+          </section>
+
+          <section className="panel">
+            <div className="panel-heading">
+              <FileSearch size={18} />
+              <h2>Project run</h2>
+            </div>
+            <form className="project-form" onSubmit={runCheck}>
+              <label>
+                Project name
+                <input
+                  onChange={(event) => setRunForm({ ...runForm, projectName: event.target.value })}
+                  placeholder="e.g. SEO blog / main domain"
+                  value={runForm.projectName}
+                />
+              </label>
+              <label>
+                Domain
+                <input
+                  onChange={(event) => setRunForm({ ...runForm, domain: event.target.value })}
+                  placeholder="example.com"
+                  value={runForm.domain}
+                />
+              </label>
+              <label>
+                Sitemap URL
+                <input
+                  onChange={(event) => setRunForm({ ...runForm, sitemapUrl: event.target.value })}
+                  placeholder="https://example.com/sitemap.xml"
+                  required
+                  value={runForm.sitemapUrl}
+                />
+              </label>
+              <label>
+                GSC property (optional)
+                <input
+                  onChange={(event) => setRunForm({ ...runForm, gscPropertyUrl: event.target.value })}
+                  placeholder={inferredGscProperty || "sc-domain:example.com"}
+                  value={runForm.gscPropertyUrl}
+                />
+                <span className="form-hint">
+                  {inferredGscProperty ? `Auto: ${inferredGscProperty}` : "Auto-filled from domain or sitemap URL"}
+                </span>
+              </label>
+              <div className="inline-fields inline-fields-3">
+                <label>
+                  Batch size
+                  <input
+                    inputMode="numeric"
+                    onChange={(event) => setRunForm({ ...runForm, batchSize: event.target.value })}
+                    value={runForm.batchSize}
+                  />
+                </label>
+                <label>
+                  hl
+                  <input onChange={(event) => setRunForm({ ...runForm, serperHl: event.target.value })} value={runForm.serperHl} />
+                </label>
+                <label>
+                  gl
+                  <input onChange={(event) => setRunForm({ ...runForm, serperGl: event.target.value })} value={runForm.serperGl} />
+                </label>
+              </div>
+              <label>
+                Run mode
+                <select onChange={(event) => setRunMode(event.target.value as SavedRunMode)} value={runMode}>
+                  <option value="ALL_URLS">All URLs from sitemap</option>
+                  <option value="LAST_NOT_INDEXED">Only URLs that were not indexed in the last run</option>
+                </select>
+              </label>
+              <div className="helper-box">
+                {selectedProject
+                  ? `Runs for this project will be saved locally. Last source: ${selectedProject.lastRunSource ? PROVIDER_LABELS[selectedProject.lastRunSource] : "none yet"}.`
+                  : "If you add a project name, the app will save this project locally before the run so you can come back to it later."}
+              </div>
+              <div className="button-row">
+                <button className="button secondary" onClick={() => void saveCurrentProject()} type="button">
+                  <Save size={16} />
+                  {selectedProjectId ? "Update project" : "Save project"}
+                </button>
+                <button className="button primary" disabled={busy} type="submit">
+                  <Play size={16} />
+                  {busy ? "Checking..." : "Run check"}
+                </button>
+              </div>
+            </form>
+          </section>
+
+          <section className="panel">
+            <div className="panel-heading">
+              <History size={18} />
+              <h2>Run history</h2>
+            </div>
+            <div className="history-list">
+              {runHistory.map((run) => (
+                <button
+                  key={run.id}
+                  className={
+                    result && "runId" in result && result.runId === run.id ? "history-row active" : "history-row"
+                  }
+                  onClick={() => void loadSavedRun(run.projectId, run.id)}
+                  type="button"
+                >
+                  <div>
+                    <strong>{new Date(run.completedAt).toLocaleString("pl-PL")}</strong>
+                    <span>
+                      {run.mode === "LAST_NOT_INDEXED" ? "Only previous not indexed" : "Full sitemap"} | {PROVIDER_LABELS[run.source]}
+                    </span>
+                  </div>
+                  <div className="history-metrics">
+                    <span>{run.summary.notIndexed} not indexed</span>
+                    <span>{run.changedCount} changed</span>
+                  </div>
+                </button>
+              ))}
+              {!runHistory.length ? (
+                <div className="empty-helper">
+                  {selectedProjectId ? "No saved runs yet for this project." : "Select or save a project to build history."}
+                </div>
+              ) : null}
+            </div>
+          </section>
+
           <section className="panel" ref={settingsRef}>
             <div className="panel-heading">
               <Settings2 size={18} />
@@ -327,9 +670,7 @@ export function Dashboard() {
                     <label>
                       SERP query strategy
                       <select
-                        onChange={(event) =>
-                          setSettingsForm({ ...settingsForm, serpQueryStrategy: event.target.value })
-                        }
+                        onChange={(event) => setSettingsForm({ ...settingsForm, serpQueryStrategy: event.target.value })}
                         value={settingsForm.serpQueryStrategy}
                       >
                         {SERP_QUERY_STRATEGY_VALUES.map((strategy) => (
@@ -353,9 +694,7 @@ export function Dashboard() {
                   <label>
                     Google service account file
                     <input
-                      onChange={(event) =>
-                        setSettingsForm({ ...settingsForm, googleServiceAccountFile: event.target.value })
-                      }
+                      onChange={(event) => setSettingsForm({ ...settingsForm, googleServiceAccountFile: event.target.value })}
                       placeholder="C:\\path\\to\\service-account.json"
                       value={settingsForm.googleServiceAccountFile}
                     />
@@ -363,9 +702,7 @@ export function Dashboard() {
                   <label>
                     Google service account JSON
                     <textarea
-                      onChange={(event) =>
-                        setSettingsForm({ ...settingsForm, googleServiceAccountJson: event.target.value })
-                      }
+                      onChange={(event) => setSettingsForm({ ...settingsForm, googleServiceAccountJson: event.target.value })}
                       placeholder="Paste service account JSON if you do not want to use a file path"
                       value={settingsForm.googleServiceAccountJson}
                     />
@@ -399,9 +736,7 @@ export function Dashboard() {
                     Serper API key
                     <input
                       onChange={(event) => setSettingsForm({ ...settingsForm, serperApiKey: event.target.value })}
-                      placeholder={
-                        settings?.hasSerperApiKey ? "Configured - enter a new key to replace it" : "Paste Serper API key"
-                      }
+                      placeholder={settings?.hasSerperApiKey ? "Configured - enter a new key to replace it" : "Paste Serper API key"}
                       value={settingsForm.serperApiKey}
                     />
                     <span className="form-hint">
@@ -423,9 +758,7 @@ export function Dashboard() {
                     SerpApi key
                     <input
                       onChange={(event) => setSettingsForm({ ...settingsForm, serpApiKey: event.target.value })}
-                      placeholder={
-                        settings?.hasSerpApiKey ? "Configured - enter a new key to replace it" : "Paste SerpApi key"
-                      }
+                      placeholder={settings?.hasSerpApiKey ? "Configured - enter a new key to replace it" : "Paste SerpApi key"}
                       value={settingsForm.serpApiKey}
                     />
                     <span className="form-hint">
@@ -448,25 +781,17 @@ export function Dashboard() {
                       DataForSEO login
                       <input
                         onChange={(event) => setSettingsForm({ ...settingsForm, dataForSeoLogin: event.target.value })}
-                        placeholder={
-                          settings?.hasDataForSeoCredentials
-                            ? "Configured - enter a new login to replace it"
-                            : "DataForSEO API login"
-                        }
+                        placeholder={settings?.hasDataForSeoCredentials ? "Configured - enter a new login to replace it" : "DataForSEO API login"}
                         value={settingsForm.dataForSeoLogin}
                       />
                       <span className="form-hint">
-                        {settings?.dataForSeoLoginHint
-                          ? `Current: ${settings.dataForSeoLoginHint}`
-                          : "No DataForSEO login saved yet."}
+                        {settings?.dataForSeoLoginHint ? `Current: ${settings.dataForSeoLoginHint}` : "No DataForSEO login saved yet."}
                       </span>
                     </label>
                     <label>
                       DataForSEO password
                       <input
-                        onChange={(event) =>
-                          setSettingsForm({ ...settingsForm, dataForSeoPassword: event.target.value })
-                        }
+                        onChange={(event) => setSettingsForm({ ...settingsForm, dataForSeoPassword: event.target.value })}
                         placeholder="DataForSEO API password"
                         type="password"
                         value={settingsForm.dataForSeoPassword}
@@ -477,9 +802,7 @@ export function Dashboard() {
                     <label>
                       DataForSEO location code
                       <input
-                        onChange={(event) =>
-                          setSettingsForm({ ...settingsForm, dataForSeoLocationCode: event.target.value })
-                        }
+                        onChange={(event) => setSettingsForm({ ...settingsForm, dataForSeoLocationCode: event.target.value })}
                         placeholder="Optional numeric code"
                         value={settingsForm.dataForSeoLocationCode}
                       />
@@ -487,9 +810,7 @@ export function Dashboard() {
                     <label>
                       DataForSEO location name
                       <input
-                        onChange={(event) =>
-                          setSettingsForm({ ...settingsForm, dataForSeoLocationName: event.target.value })
-                        }
+                        onChange={(event) => setSettingsForm({ ...settingsForm, dataForSeoLocationName: event.target.value })}
                         placeholder="Optional, e.g. Warsaw,Mazowieckie,Poland"
                         value={settingsForm.dataForSeoLocationName}
                       />
@@ -497,9 +818,7 @@ export function Dashboard() {
                     <label>
                       DataForSEO language code
                       <input
-                        onChange={(event) =>
-                          setSettingsForm({ ...settingsForm, dataForSeoLanguageCode: event.target.value })
-                        }
+                        onChange={(event) => setSettingsForm({ ...settingsForm, dataForSeoLanguageCode: event.target.value })}
                         placeholder="pl"
                         value={settingsForm.dataForSeoLanguageCode}
                       />
@@ -555,103 +874,6 @@ export function Dashboard() {
               </button>
             )}
           </section>
-
-          <section className="panel">
-            <div className="panel-heading">
-              <FileSearch size={18} />
-              <h2>Run check</h2>
-            </div>
-            <form className="project-form" onSubmit={runCheck}>
-              <label>
-                Domain
-                <input
-                  onChange={(event) => setForm({ ...form, domain: event.target.value })}
-                  placeholder="example.com"
-                  value={form.domain}
-                />
-              </label>
-              <label>
-                Sitemap URL
-                <input
-                  onChange={(event) => setForm({ ...form, sitemapUrl: event.target.value })}
-                  placeholder="https://example.com/sitemap.xml"
-                  required
-                  value={form.sitemapUrl}
-                />
-              </label>
-              <label>
-                GSC property (optional)
-                <input
-                  onChange={(event) => setForm({ ...form, gscPropertyUrl: event.target.value })}
-                  placeholder={inferredGscProperty || "sc-domain:example.com"}
-                  value={form.gscPropertyUrl}
-                />
-                <span className="form-hint">
-                  {inferredGscProperty ? `Auto: ${inferredGscProperty}` : "Auto-filled from domain or sitemap URL"}
-                </span>
-              </label>
-              <div className="inline-fields inline-fields-3">
-                <label>
-                  Batch size
-                  <input
-                    inputMode="numeric"
-                    onChange={(event) => setForm({ ...form, batchSize: event.target.value })}
-                    value={form.batchSize}
-                  />
-                </label>
-                <label>
-                  hl
-                  <input onChange={(event) => setForm({ ...form, serperHl: event.target.value })} value={form.serperHl} />
-                </label>
-                <label>
-                  gl
-                  <input onChange={(event) => setForm({ ...form, serperGl: event.target.value })} value={form.serperGl} />
-                </label>
-              </div>
-              <div className="helper-box">
-                {settings?.resolvedProvider
-                  ? `${PROVIDER_LABELS[settings.resolvedProvider]} is ready. Current mode: ${PROVIDER_LABELS[settings.checkProvider]}.`
-                  : settings?.resolvedProviderError || "Configure a provider in Settings before running the check."}
-              </div>
-              <button className="button primary" disabled={busy} type="submit">
-                <Play size={16} />
-                {busy ? "Checking..." : "Run sitemap check"}
-              </button>
-            </form>
-          </section>
-
-          <section className="panel">
-            <div className="panel-heading">
-              <Download size={18} />
-              <h2>Summary</h2>
-            </div>
-            <div className="summary-grid">
-              <div className="summary-card">
-                <span>Total</span>
-                <strong>{result?.summary.total ?? 0}</strong>
-              </div>
-              <div className="summary-card">
-                <span>Indexed</span>
-                <strong>{result?.summary.indexed ?? 0}</strong>
-              </div>
-              <div className="summary-card">
-                <span>Not indexed</span>
-                <strong>{result?.summary.notIndexed ?? 0}</strong>
-              </div>
-              <div className="summary-card">
-                <span>Unknown</span>
-                <strong>{result?.summary.unknown ?? 0}</strong>
-              </div>
-              <div className="summary-card">
-                <span>Errors</span>
-                <strong>{result?.summary.errors ?? 0}</strong>
-              </div>
-              <div className="summary-card">
-                <span>Provider</span>
-                <strong>{result ? PROVIDER_LABELS[result.source] : "-"}</strong>
-              </div>
-            </div>
-          </section>
         </aside>
 
         <section className="main-panel">
@@ -659,10 +881,24 @@ export function Dashboard() {
             <div className="project-meta">
               <FileSearch size={20} />
               <div>
-                <h2>Results</h2>
-                <p>{result ? result.sitemapUrl : "Run a sitemap check to see live results."}</p>
+                <h2>{result && "projectName" in result && result.projectName ? result.projectName : "Results"}</h2>
+                <p>
+                  {result
+                    ? `${result.sitemapUrl}${"runMode" in result && result.runMode ? ` | ${formatRunMode(result.runMode)}` : ""}`
+                    : selectedProject
+                      ? `${selectedProject.domain} | waiting for the next run`
+                      : "Run a sitemap check to see live results."}
+                </p>
               </div>
             </div>
+            {result ? (
+              <div className="actions compact-actions">
+                <StatusPill tone="muted">Provider: {PROVIDER_LABELS[result.source]}</StatusPill>
+                {"changedCount" in result && result.changedCount ? (
+                  <StatusPill tone="warn">{result.changedCount} changed</StatusPill>
+                ) : null}
+              </div>
+            ) : null}
           </div>
 
           {notice ? (
@@ -673,6 +909,35 @@ export function Dashboard() {
                   Open settings
                 </button>
               ) : null}
+            </div>
+          ) : null}
+
+          {result ? (
+            <div className="run-summary-bar">
+              <div className="summary-chip">
+                <span>Total</span>
+                <strong>{result.summary.total}</strong>
+              </div>
+              <div className="summary-chip">
+                <span>Indexed</span>
+                <strong>{result.summary.indexed}</strong>
+              </div>
+              <div className="summary-chip">
+                <span>Not indexed</span>
+                <strong>{result.summary.notIndexed}</strong>
+              </div>
+              <div className="summary-chip">
+                <span>Unknown</span>
+                <strong>{result.summary.unknown}</strong>
+              </div>
+              <div className="summary-chip">
+                <span>Errors</span>
+                <strong>{result.summary.errors}</strong>
+              </div>
+              <div className="summary-chip">
+                <span>Changed</span>
+                <strong>{"changedCount" in result ? result.changedCount || 0 : 0}</strong>
+              </div>
             </div>
           ) : null}
 
@@ -695,9 +960,11 @@ export function Dashboard() {
                 <tr>
                   <th>URL</th>
                   <th>Status</th>
+                  <th>Changed</th>
                   <th>Provider</th>
-                  <th>Checked</th>
+                  <th>Lookup</th>
                   <th>Detail</th>
+                  <th>Checked</th>
                   <th>Error</th>
                 </tr>
               </thead>
@@ -712,15 +979,25 @@ export function Dashboard() {
                     <td>
                       <StatusPill tone={statusTone(row.status)}>{formatStatus(row.status)}</StatusPill>
                     </td>
+                    <td>
+                      {row.changedSincePrevious ? (
+                        <StatusPill tone="warn">Changed</StatusPill>
+                      ) : row.previousStatus ? (
+                        <StatusPill tone="muted">No change</StatusPill>
+                      ) : (
+                        <StatusPill tone="muted">First run</StatusPill>
+                      )}
+                    </td>
                     <td>{PROVIDER_LABELS[row.source]}</td>
-                    <td>{new Date(row.checkedAt).toLocaleString("pl-PL")}</td>
+                    <td className="detail-cell">{row.lookup || "-"}</td>
                     <td className="detail-cell">{row.detail || "-"}</td>
+                    <td>{new Date(row.checkedAt).toLocaleString("pl-PL")}</td>
                     <td className="error-cell">{row.error || ""}</td>
                   </tr>
                 ))}
                 {!filteredRows.length ? (
                   <tr>
-                    <td className="empty-state" colSpan={6}>
+                    <td className="empty-state" colSpan={8}>
                       {result ? "No rows for the current filter." : "No results yet."}
                     </td>
                   </tr>
@@ -748,6 +1025,9 @@ function matchesFilter(row: SitemapCheckRow, filter: (typeof filters)[number]["v
   if (filter === "not-indexed") {
     return row.status === "NOT_INDEXED";
   }
+  if (filter === "changed") {
+    return Boolean(row.changedSincePrevious);
+  }
   if (filter === "unknown") {
     return row.status === "UNKNOWN";
   }
@@ -767,6 +1047,10 @@ function formatStatus(status: IndexStatus) {
   return "Unknown";
 }
 
+function formatRunMode(mode: SavedRunMode) {
+  return mode === "LAST_NOT_INDEXED" ? "refreshing only previously not indexed URLs" : "full sitemap run";
+}
+
 function statusTone(status: IndexStatus): "ok" | "bad" | "muted" | "warn" {
   if (status === "INDEXED") {
     return "ok";
@@ -778,6 +1062,11 @@ function statusTone(status: IndexStatus): "ok" | "bad" | "muted" | "warn" {
     return "bad";
   }
   return "muted";
+}
+
+function upsertProject(projects: SavedProject[], project: SavedProject) {
+  const next = [...projects.filter((entry) => entry.id !== project.id), project];
+  return next.sort((left, right) => (right.lastRunAt || right.updatedAt).localeCompare(left.lastRunAt || left.updatedAt));
 }
 
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {

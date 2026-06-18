@@ -13,16 +13,20 @@ import { checkSerpApiVisibility } from "@/lib/serpapi";
 import { checkSerpVisibility } from "@/lib/serper";
 import { collectSitemapUrls } from "@/lib/sitemap";
 import { getIntegerEnv, getOptionalEnv } from "@/lib/env";
-import { inferGscPropertyUrl, normalizeDomain } from "@/lib/url";
+import { inferGscPropertyUrl, normalizeDomain, normalizeUrlForComparison } from "@/lib/url";
 
 export type IndexCheckSource = ActiveCheckProvider;
 export type IndexStatus = "INDEXED" | "NOT_INDEXED" | "UNKNOWN" | "ERROR";
 
 export type SitemapCheckRow = {
   checkedAt: string;
+  changedSincePrevious?: boolean;
   detail: string | null;
   error: string | null;
   lastmod: string | null;
+  lookup: string | null;
+  previousStatus?: IndexStatus | null;
+  queryAttempts?: string[];
   source: IndexCheckSource;
   status: IndexStatus;
   url: string;
@@ -37,9 +41,15 @@ export type SitemapCheckSummary = {
 };
 
 export type SitemapCheckResponse = {
+  changedCount?: number;
   domain: string;
   gscPropertyUrl: string | null;
+  previousRunId?: string | null;
+  projectId?: string | null;
+  projectName?: string | null;
   rows: SitemapCheckRow[];
+  runId?: string | null;
+  runMode?: "ALL_URLS" | "LAST_NOT_INDEXED" | null;
   sitemapUrl: string;
   source: IndexCheckSource;
   summary: SitemapCheckSummary;
@@ -49,6 +59,7 @@ export type RunSitemapCheckInput = {
   batchSize?: number;
   domain?: string;
   gscPropertyUrl?: string;
+  restrictToUrls?: string[];
   serperGl?: string;
   serperHl?: string;
   sitemapUrl: string;
@@ -71,16 +82,19 @@ export async function runSitemapCheck(input: RunSitemapCheckInput): Promise<Site
   const source = resolveCheckProvider();
   const gscPropertyUrl = source === "GSC" ? normalizeGscProperty(input.gscPropertyUrl, domain) : null;
   const serpQueryStrategy = resolveSerpQueryStrategy();
-  const urls = await collectSitemapUrls(sitemapUrl, domain);
+  const urls = filterEntries(await collectSitemapUrls(sitemapUrl, domain), input.restrictToUrls);
   const batchSize = normalizeBatchSize(input.batchSize);
   const rows = await mapWithConcurrency(urls, batchSize, async (entry) => {
     if (source === "GSC") {
       const gsc = await inspectGoogleIndex(entry.loc, gscPropertyUrl!);
       return {
         checkedAt: new Date().toISOString(),
-        detail: gsc.verdict || gsc.coverageState || gsc.indexingState || null,
+        detail: buildGscDetail(gsc),
         error: gsc.error,
         lastmod: entry.lastmod?.toISOString() ?? null,
+        lookup: buildGscLookup(gsc.status),
+        previousStatus: null,
+        queryAttempts: [],
         source,
         status: mapGscOutcome(gsc.status),
         url: entry.loc
@@ -95,9 +109,12 @@ export async function runSitemapCheck(input: RunSitemapCheckInput): Promise<Site
 
     return {
       checkedAt: new Date().toISOString(),
-      detail: serp.matchedUrl || serp.queryAttempts.join(" -> "),
+      detail: buildSerpDetail(serp),
       error: serp.error,
       lastmod: entry.lastmod?.toISOString() ?? null,
+      lookup: buildSerpLookup(serp),
+      previousStatus: null,
+      queryAttempts: serp.queryAttempts,
       source,
       status: mapSerpOutcome(serp.status),
       url: entry.loc
@@ -144,6 +161,27 @@ function normalizeBatchSize(value: number | undefined): number {
   return Math.max(1, Math.min(parsed, MAX_BATCH_SIZE));
 }
 
+function filterEntries(
+  entries: Awaited<ReturnType<typeof collectSitemapUrls>>,
+  restrictToUrls: string[] | undefined
+) {
+  if (!restrictToUrls?.length) {
+    return entries;
+  }
+
+  const allowed = new Set(
+    restrictToUrls.map((value) => {
+      try {
+        return normalizeUrlForComparison(value);
+      } catch {
+        return value.trim();
+      }
+    })
+  );
+
+  return entries.filter((entry) => allowed.has(entry.normalizedUrl));
+}
+
 async function runSerpProvider(
   source: Exclude<IndexCheckSource, "GSC">,
   url: string,
@@ -185,6 +223,60 @@ function mapSerpOutcome(status: string): IndexStatus {
     return "ERROR";
   }
   return "UNKNOWN";
+}
+
+function buildGscLookup(status: string) {
+  if (status === "PASS") {
+    return "GSC says indexed";
+  }
+  if (status === "FAIL") {
+    return "GSC says not indexed";
+  }
+  if (status === "ERROR") {
+    return "GSC request error";
+  }
+  if (status === "SKIPPED") {
+    return "GSC skipped";
+  }
+  return "GSC returned unknown state";
+}
+
+function buildGscDetail(gsc: Awaited<ReturnType<typeof inspectGoogleIndex>>) {
+  const parts = [gsc.verdict, gsc.coverageState, gsc.indexingState].filter(Boolean);
+  return parts.length ? parts.join(" | ") : null;
+}
+
+function buildSerpLookup(serp: SerpCheckOutcome) {
+  const firstQuery = serp.queryAttempts[0] || "";
+  const usedRawFallback = serp.queryAttempts.length > 1 && serp.query === serp.queryAttempts[serp.queryAttempts.length - 1];
+
+  if (serp.status === "VISIBLE") {
+    return usedRawFallback ? "Matched on raw URL fallback" : `Matched on ${labelQuery(firstQuery)}`;
+  }
+  if (serp.status === "NOT_VISIBLE") {
+    return usedRawFallback
+      ? "Not found after site query and raw URL fallback"
+      : `Not found on ${labelQuery(firstQuery)}`;
+  }
+  if (serp.status === "SKIPPED") {
+    return "Provider skipped";
+  }
+  return "Provider request error";
+}
+
+function buildSerpDetail(serp: SerpCheckOutcome) {
+  const parts: string[] = [];
+  if (serp.matchedUrl) {
+    parts.push(`Match: ${serp.matchedUrl}`);
+  }
+  if (serp.queryAttempts.length) {
+    parts.push(`Queries: ${serp.queryAttempts.join(" -> ")}`);
+  }
+  return parts.length ? parts.join(" | ") : null;
+}
+
+function labelQuery(query: string) {
+  return query.startsWith("site:") ? "site query" : "raw URL query";
 }
 
 function summarizeRows(rows: SitemapCheckRow[]): SitemapCheckSummary {

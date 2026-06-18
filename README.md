@@ -6,11 +6,14 @@ Current branch is intentionally database-free in the core flow:
 
 - import URLs from a sitemap or sitemap index
 - check indexing / visibility one URL at a time
+- save projects and run history locally on disk
+- reopen previous projects and refresh only URLs that were not indexed last time
 - show results immediately in the UI
+- compare the current run against the previous run
 - export CSV
 - keep provider configuration in local `.env`
 
-That makes the app usable even when Postgres is unavailable or unwanted. A database can be added later as an optional persistence layer without blocking the checker itself.
+That makes the app usable even when Postgres is unavailable or unwanted. The checker and the project history work without Postgres. A database can still be added later as an optional persistence layer without blocking the core app.
 
 ## What it checks today
 
@@ -34,7 +37,7 @@ For SERP-based providers you can choose the query strategy:
 
 The result is treated as a hit only when the normalized result URL exactly matches the checked URL. Similar URLs are not counted as indexed.
 
-## Why no DB in the main flow
+## Why no required DB in the main flow
 
 Earlier iterations used Prisma + Postgres for projects, runs and cached results. In practice that created friction before the core checker was even usable.
 
@@ -42,8 +45,9 @@ So the current architecture is:
 
 - core checker: no database required
 - settings: stored in local `.env`
+- projects and run history: stored in `.index-checker-data/projects.json`
 - output: immediate table + CSV
-- future persistence: optional, not required for running checks
+- future database: optional, not required for running checks
 
 This keeps database interference non-critical by design.
 
@@ -151,16 +155,21 @@ Some public SearXNG instances disable JSON or do not expose Google, so this opti
 3. Deduplicate normalized URLs.
 4. Ignore URLs outside the selected domain.
 5. Run checks with limited concurrency.
-6. Show live results in the table.
-7. Export the whole batch as CSV.
+6. Save the run when it belongs to a named project.
+7. Compare the current run against the previous one for the same project.
+8. Show live results in the table.
+9. Export the whole batch as CSV.
 
 No crawling beyond sitemap discovery happens in this branch.
 
 ## UI overview
 
+- `Projects` panel with saved local projects
 - `Settings` panel for provider selection and credentials
-- `Run check` form for sitemap URL, domain, property, batch size, `hl`, `gl`
-- `Results` table with filters
+- `Project run` form for sitemap URL, domain, property, batch size, `hl`, `gl`
+- `Run history` list for reopening previous scans
+- `Results` table with filters, lookup explanation, and change tracking
+- `Dark mode`
 - `Export CSV`
 
 ## Developer commands
@@ -212,10 +221,8 @@ If you want a different provider, force it in Settings.
 - provider resolution
 - SERP query strategy fallback
 
-## Next sensible step
+## What is still future work
 
-Add persistence as a separate module, not as a prerequisite for the checker. The clean shape is:
-
-- checker runs without storage
-- optional storage adapter saves projects, runs, cache and history
-- the UI still works even if storage is disabled or broken
+- background jobs instead of keeping a browser tab open for very large runs
+- email notification after completion
+- optional database backend for multi-user or server-hosted deployments
