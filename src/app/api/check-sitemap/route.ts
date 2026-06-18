@@ -5,6 +5,7 @@ import { runSitemapCheck } from "@/lib/sitemap-check";
 type CheckSitemapBody = {
   batchSize?: number;
   domain?: string;
+  excludeRules?: string[];
   gscPropertyUrl?: string;
   serperGl?: string;
   serperHl?: string;
@@ -21,6 +22,7 @@ export async function POST(request: Request) {
     const result = await runSitemapCheck({
       batchSize: body.batchSize,
       domain: body.domain,
+      excludeRules: body.excludeRules,
       gscPropertyUrl: body.gscPropertyUrl,
       serperGl: body.serperGl,
       serperHl: body.serperHl,

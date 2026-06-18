@@ -195,6 +195,24 @@ textarea:focus {
   font-weight: 500;
 }
 
+.checkbox-field {
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+}
+
+.checkbox-field input {
+  width: 16px;
+  min-height: 16px;
+  margin: 0;
+}
+
+.checkbox-field span {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
 .inline-fields {
   display: grid;
   grid-template-columns: 1fr 1fr;

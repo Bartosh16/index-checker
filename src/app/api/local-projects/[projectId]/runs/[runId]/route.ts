@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { jsonError } from "@/lib/api";
-import { getSavedProject, getSavedRun } from "@/lib/project-store";
+import { buildSavedResultResponse, getSavedProject, getSavedRun } from "@/lib/project-store";
 
 export async function GET(
   _request: Request,
@@ -20,27 +20,23 @@ export async function GET(
         changedCount: run.changedCount,
         completedAt: run.completedAt,
         createdAt: run.createdAt,
+        errorMessage: run.errorMessage,
+        excludedUrls: run.excludedUrls,
         id: run.id,
         mode: run.mode,
         previousRunId: run.previousRunId,
+        processedUrls: run.processedUrls,
         projectId: run.projectId,
+        requestedAt: run.requestedAt,
+        rowsChecked: run.rowsChecked,
         source: run.source,
+        startedAt: run.startedAt,
+        status: run.status,
         summary: run.summary
+        ,
+        totalUrls: run.totalUrls
       },
-      result: {
-        changedCount: run.changedCount,
-        domain: run.domain,
-        gscPropertyUrl: run.gscPropertyUrl,
-        previousRunId: run.previousRunId,
-        projectId: run.projectId,
-        projectName: run.projectName,
-        rows: run.rows,
-        runId: run.id,
-        runMode: run.mode,
-        sitemapUrl: run.sitemapUrl,
-        source: run.source,
-        summary: run.summary
-      }
+      result: run.status === "COMPLETED" ? buildSavedResultResponse(run) : null
     });
   } catch {
     return jsonError("Could not load saved run.", 500);

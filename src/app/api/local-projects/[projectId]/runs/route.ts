@@ -1,8 +1,10 @@
 import { NextResponse } from "next/server";
 import { jsonError, readJson } from "@/lib/api";
-import { getProjectTargetsFromLastRun, getSavedProject, listSavedRuns, saveRunResult } from "@/lib/project-store";
+import { resolveCheckProvider } from "@/lib/sitemap-check";
+import { readLocalSettings } from "@/lib/local-settings";
+import { launchSavedRun } from "@/lib/local-runner";
+import { createSavedRun, getProjectTargetsFromLastRun, getSavedProject, listSavedRuns } from "@/lib/project-store";
 import type { SavedRunMode } from "@/lib/project-types";
-import { runSitemapCheck } from "@/lib/sitemap-check";
 
 type CreateRunBody = {
   batchSize?: number;
@@ -31,19 +33,22 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
     }
 
     const mode = body.mode === "LAST_NOT_INDEXED" ? "LAST_NOT_INDEXED" : "ALL_URLS";
-    const restrictToUrls = await getProjectTargetsFromLastRun(project.id, mode);
-    const result = await runSitemapCheck({
-      batchSize: body.batchSize,
-      domain: project.domain,
-      gscPropertyUrl: project.gscPropertyUrl,
-      restrictToUrls: restrictToUrls ?? undefined,
-      serperGl: project.serperGl,
-      serperHl: project.serperHl,
-      sitemapUrl: project.sitemapUrl
-    });
+    if (mode === "LAST_NOT_INDEXED") {
+      await getProjectTargetsFromLastRun(project.id, mode);
+    }
 
-    const saved = await saveRunResult(project, result, mode);
-    return NextResponse.json(saved, { status: 201 });
+    const source = resolveCheckProvider();
+    const settings = readLocalSettings();
+    const notificationEmail = project.notificationEmail.trim() || settings.defaultNotificationEmail.trim();
+
+    const run = await createSavedRun(project, {
+      mode,
+      notificationEmail,
+      source
+    });
+    launchSavedRun(project.id, run.id, body.batchSize);
+
+    return NextResponse.json({ project, run }, { status: 201 });
   } catch (error) {
     return jsonError(error instanceof Error ? error.message : "Could not run saved project.", 400);
   }

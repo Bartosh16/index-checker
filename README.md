@@ -1,23 +1,34 @@
 # Index Checker
 
-Batch checker for URLs pulled from XML sitemaps.
+Index Checker is a Next.js app for checking sitemap URLs from your own domains and saving project history without requiring Postgres for the core flow.
 
-Current branch is intentionally database-free in the core flow:
+Current MVP includes:
 
-- import URLs from a sitemap or sitemap index
-- check indexing / visibility one URL at a time
-- save projects and run history locally on disk
-- reopen previous projects and refresh only URLs that were not indexed last time
-- show results immediately in the UI
-- compare the current run against the previous run
-- export CSV
-- keep provider configuration in local `.env`
+- project save/load
+- dark mode
+- one-click provider setup from the UI
+- API key verification from the UI
+- exclude rules for junk URLs from sitemaps
+- rerun mode for only previously not indexed URLs
+- local project/run persistence on disk
+- background project runs
+- optional email notification after a whole project finishes
+- CSV export
 
-That makes the app usable even when Postgres is unavailable or unwanted. The checker and the project history work without Postgres. A database can still be added later as an optional persistence layer without blocking the core app.
+The checker works without a database. Postgres remains optional for later expansion, but it is not in the critical path anymore.
 
-## What it checks today
+## How it works
 
-One run uses one active provider at a time:
+1. You create or load a project.
+2. You paste a sitemap URL.
+3. The app imports URLs from `urlset` or `sitemapindex`.
+4. URLs outside the selected domain are ignored.
+5. Optional exclude rules remove junk URLs before checks start.
+6. The active provider checks indexing / SERP visibility.
+7. The run is saved locally so you can come back later.
+8. Next time you can rerun only URLs that were `NOT_INDEXED` in the last completed run.
+
+## What providers are supported
 
 - `Google Search Console`
 - `Serper`
@@ -25,154 +36,306 @@ One run uses one active provider at a time:
 - `DataForSEO`
 - `SearXNG`
 
-Supported modes:
+Provider mode options:
 
-- `AUTO` - first configured provider wins
-- forced provider mode - use exactly the provider selected in Settings
+- `AUTO` - first fully configured provider wins
+- forced provider mode - exactly the provider selected in Settings is used
 
-For SERP-based providers you can choose the query strategy:
+SERP query strategy options:
 
 - `SITE_ONLY` - only `site:<full-url>`
-- `SITE_THEN_URL` - first `site:<full-url>`, then retry with the raw URL
+- `SITE_THEN_URL` - first `site:<full-url>`, then raw URL fallback
 
-The result is treated as a hit only when the normalized result URL exactly matches the checked URL. Similar URLs are not counted as indexed.
+Exact-match logic is strict. Similar URLs are not treated as indexed.
 
-## Why no required DB in the main flow
+## Important architecture note
 
-Earlier iterations used Prisma + Postgres for projects, runs and cached results. In practice that created friction before the core checker was even usable.
-
-So the current architecture is:
+This branch is intentionally database-light:
 
 - core checker: no database required
-- settings: stored in local `.env`
-- projects and run history: stored in `.index-checker-data/projects.json`
-- output: immediate table + CSV
-- future database: optional, not required for running checks
+- provider settings: read from `.env` and `.env.local`
+- UI-saved secrets: written to `.env.local`
+- projects and run history: written to `.index-checker-data/projects.json`
+- background runs: handled by the Node server process
 
-This keeps database interference non-critical by design.
+That means:
+
+- local use works immediately
+- self-hosted VPS / Docker use is fine
+- serverless platforms with hard request/runtime limits are not the best fit for background runs in this version
 
 ## Requirements
 
-- Node.js 22+
+- Node.js `22.13+` recommended
 - npm
 - optional: Docker Desktop if you want to experiment with Postgres later
 
-## Quick start
+The current environment in this repo showed warnings on `22.11.0`, so `22.13+` is the safer floor.
 
-### Windows
+## Quick start on Windows
+
+### 1. Install dependencies
 
 ```bat
 install.bat
+```
+
+What it does:
+
+- checks Node and npm
+- installs packages
+- generates Prisma Client
+- optionally offers Docker / Prisma DB steps
+
+The app still works if you skip the database steps.
+
+### 2. Start the app
+
+```bat
 start.bat
 ```
 
-`start.bat` starts the dev server and opens the app automatically in your browser.
+What it does:
 
-### Manual
+- starts the Next.js dev server
+- opens the browser automatically
+- defaults to [http://127.0.0.1:3001](http://127.0.0.1:3001)
+
+## Manual start
 
 ```bash
 npm install
-npm run dev
+npm run dev -- -H 127.0.0.1 -p 3001
 ```
 
-Open [http://127.0.0.1:3001](http://127.0.0.1:3001) if you use the bundled Windows start script defaults.
+## First setup in the UI
 
-## Configuration
+### 1. Open `Settings`
 
-You can configure everything from the in-app `Settings` panel. The UI writes to `.env`.
+You can configure providers directly from the app.
 
-### Core settings
+### 2. Paste credentials
 
-```env
-CHECK_PROVIDER="AUTO"
-SERP_QUERY_STRATEGY="SITE_THEN_URL"
-CHECK_BATCH_SIZE="25"
-CHECK_CACHE_DAYS="7"
+Examples:
+
+- `Serper API key`
+- `SerpApi key`
+- `DataForSEO login/password`
+- `Google service account JSON`
+- `SMTP settings`
+
+### 3. Click `Save and verify`
+
+Each provider section has a verification button.
+
+Flow is:
+
+1. current form values are saved server-side
+2. the app verifies the provider from the backend
+3. the UI shows only masked hints, not raw secrets
+
+### 4. Create a project
+
+Recommended project fields:
+
+- project name
+- domain
+- sitemap URL
+- optional GSC property
+- optional notification email
+- optional exclude rules
+
+### 5. Run a check
+
+You can:
+
+- run all sitemap URLs
+- rerun only URLs that were not indexed in the last completed run
+
+## Where settings are stored
+
+Two files matter:
+
+- `.env` - base defaults and optional manual config
+- `.env.local` - UI-managed config and secrets
+
+Priority:
+
+1. process environment
+2. `.env.local`
+3. `.env`
+
+So the safe everyday workflow is:
+
+- keep non-sensitive defaults in `.env`
+- use the UI to save secrets into `.env.local`
+
+## Security model for API keys
+
+This version is designed to be practical and low-support:
+
+- secrets are saved on the server side only
+- the browser never receives raw API keys back after save
+- the UI shows masked hints only
+- `.env.local` is ignored by git
+- verification runs happen from backend routes
+
+This is strong enough for a typical local install or self-hosted internal tool.
+
+What it is not:
+
+- not a multi-tenant SaaS secret vault
+- not hardware-backed key management
+
+If you later turn this into a multi-user hosted product, move secrets to a dedicated encrypted store.
+
+## Project data and history
+
+Projects and run history are stored in:
+
+```text
+.index-checker-data/projects.json
 ```
 
-### Google Search Console
+Saved data includes:
 
-Use one of:
+- project settings
+- last completed run summary
+- full run history
+- rows checked in each run
+- comparison against the previous completed run
 
-```env
-GOOGLE_SERVICE_ACCOUNT_JSON=""
-GOOGLE_SERVICE_ACCOUNT_FILE=""
-GSC_LANGUAGE_CODE="pl-PL"
+That lets you:
+
+- close the app
+- reopen later
+- return to a project
+- rerun only still-not-indexed URLs
+
+## Exclude rules
+
+Use exclude rules when a sitemap contains junk.
+
+Rules are one per line.
+
+Supported patterns:
+
+- exact URL
+- prefix match ending with `*`
+- comment lines starting with `#`
+
+Examples:
+
+```text
+# tag pages
+https://example.com/tag/*
+
+# one exact URL
+https://example.com/privacy-policy/
 ```
 
-Notes:
+## Email notifications
 
-- the service account must be added to the relevant Search Console property
-- the app can infer a default property like `sc-domain:example.com`
-- GSC property ownership cannot be reliably discovered from page source alone, so this still comes from Search Console configuration
+Email is optional and used only for saved project runs.
 
-### Serper
+To enable it:
 
-```env
-SERPER_API_KEY=""
+1. open `Settings`
+2. fill SMTP host, port, user, password, from email
+3. optionally add a default notification email
+4. click `Save and verify`
+5. optionally override recipient inside a specific project
+
+If a project has its own notification email, that wins.
+If not, the default notification email is used.
+
+## Google Search Console note
+
+The app can infer a fallback property like:
+
+```text
+sc-domain:example.com
 ```
 
-### SerpApi
+But it cannot reliably discover the real Search Console property from page source alone.
 
-```env
-SERPAPI_API_KEY=""
+Why:
+
+- GSC ownership is not a page-level HTML fact
+- the property may be domain-level or URL-prefix-level
+- many sites expose no trustworthy clue in source code
+
+So GSC property remains an explicit configuration value.
+
+## Server deployment
+
+This version is best for:
+
+- local machine
+- Windows mini-server
+- VPS
+- Docker on a regular Node host
+
+Recommended for self-hosting:
+
+- long-lived Node process
+- writable disk for `.index-checker-data`
+- writable `.env.local`
+- outbound access to provider APIs and SMTP
+
+Not ideal for:
+
+- strict serverless environments where background work may be killed after the request ends
+
+## Performance notes
+
+Performance depends mostly on:
+
+- provider latency
+- batch size
+- provider quotas / throttling
+- whether you rerun full sitemap or only prior `NOT_INDEXED`
+
+For large projects:
+
+- saved state matters a lot
+- exclude rules help
+- rerunning only not-indexed URLs reduces cost and time sharply
+
+Current default batch size is conservative. You can raise it carefully if your provider and network tolerate it.
+
+## Local scripts
+
+### Install
+
+```bat
+install.bat
 ```
 
-### DataForSEO
+### Start
 
-At minimum:
-
-```env
-DATAFORSEO_LOGIN=""
-DATAFORSEO_PASSWORD=""
-DATAFORSEO_LOCATION_CODE=""
-DATAFORSEO_LOCATION_NAME=""
-DATAFORSEO_LANGUAGE_CODE="pl"
+```bat
+start.bat
 ```
 
-Use either `DATAFORSEO_LOCATION_CODE` or `DATAFORSEO_LOCATION_NAME`.
+### Start wrapper
 
-### SearXNG
-
-```env
-SEARXNG_BASE_URL=""
-SEARXNG_ENGINES="google"
+```bat
+skrypt.bat
 ```
 
-Example:
+## Environment example
 
-```env
-SEARXNG_BASE_URL="https://your-searxng.example"
-SEARXNG_ENGINES="google"
-```
+See [.env.example](./.env.example).
 
-Some public SearXNG instances disable JSON or do not expose Google, so this option works best with your own instance or a trusted one.
+It includes:
 
-## How the checker works
+- provider config
+- optional SMTP config
+- runtime tuning
+- optional DB URL
 
-1. Fetch the provided sitemap.
-2. Support both `urlset` and `sitemapindex`.
-3. Deduplicate normalized URLs.
-4. Ignore URLs outside the selected domain.
-5. Run checks with limited concurrency.
-6. Save the run when it belongs to a named project.
-7. Compare the current run against the previous one for the same project.
-8. Show live results in the table.
-9. Export the whole batch as CSV.
-
-No crawling beyond sitemap discovery happens in this branch.
-
-## UI overview
-
-- `Projects` panel with saved local projects
-- `Settings` panel for provider selection and credentials
-- `Project run` form for sitemap URL, domain, property, batch size, `hl`, `gl`
-- `Run history` list for reopening previous scans
-- `Results` table with filters, lookup explanation, and change tracking
-- `Dark mode`
-- `Export CSV`
-
-## Developer commands
+## Development commands
 
 ```bash
 npm run dev
@@ -181,7 +344,7 @@ npm run test
 npm run build
 ```
 
-Legacy database scripts still exist for future work:
+Legacy DB commands still exist:
 
 ```bash
 npm run db:generate
@@ -190,18 +353,18 @@ npm run db:push
 npm run db:studio
 ```
 
-They are not required for the current MVP flow.
+They are not required for the current app flow.
 
-## Notes on provider choice
+## Recommended provider order
 
-Recommended starting order:
+For your own domains:
 
-1. `Google Search Console` for owned domains
-2. `Serper` for lightweight SERP checks
-3. `SerpApi` or `DataForSEO` when you want another paid SERP source
-4. `SearXNG` when you want a self-hosted / open-source option
+1. `Google Search Console`
+2. `Serper`
+3. `SerpApi` or `DataForSEO`
+4. `SearXNG`
 
-`AUTO` currently resolves providers in this order when they are configured:
+`AUTO` resolves in this order when configured:
 
 1. `Google Search Console`
 2. `Serper`
@@ -209,20 +372,19 @@ Recommended starting order:
 4. `SerpApi`
 5. `SearXNG`
 
-If you want a different provider, force it in Settings.
-
-## Tests covered
+## Tests currently cover
 
 - sitemap parsing for `urlset`
 - sitemap index expansion
 - URL deduplication
-- ignoring off-domain URLs
-- exact URL match logic for SERP results
+- off-domain URL filtering
+- exact-match SERP URL logic
 - provider resolution
 - SERP query strategy fallback
 
 ## What is still future work
 
-- background jobs instead of keeping a browser tab open for very large runs
-- email notification after completion
-- optional database backend for multi-user or server-hosted deployments
+- stronger true background queue for serverless environments
+- encrypted-at-rest secrets for multi-user hosting
+- optional Postgres persistence layer fully decoupled from core
+- provider-specific rate dashboards and quotas in UI

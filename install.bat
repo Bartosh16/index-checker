@@ -96,7 +96,8 @@ if errorlevel 1 (
 :done
 echo.
 echo Install finished.
-echo Edit .env before running checks if API keys are missing.
+echo You can configure API keys later from the in-app Settings panel.
+echo UI-managed secrets are written to .env.local.
 echo Database is optional for the current MVP.
 echo Start the app with start.bat
 echo.

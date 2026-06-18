@@ -1,7 +1,19 @@
 "use client";
 
-import { Download, FilePlus2, FileSearch, History, Moon, Play, RefreshCcw, Save, Settings2, Sun } from "lucide-react";
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Download,
+  FilePlus2,
+  FileSearch,
+  History,
+  Moon,
+  Play,
+  RefreshCcw,
+  Save,
+  Settings2,
+  ShieldCheck,
+  Sun
+} from "lucide-react";
+import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CHECK_PROVIDER_VALUES,
   PROVIDER_LABELS,
@@ -9,6 +21,7 @@ import {
   SERP_QUERY_STRATEGY_VALUES
 } from "@/lib/check-providers";
 import { toCsv } from "@/lib/csv";
+import { parseExcludeRulesText, serializeExcludeRules } from "@/lib/exclude-rules";
 import type { LocalSettings } from "@/lib/local-settings";
 import type { SavedProject, SavedResultResponse, SavedRunMode, SavedRunSummary } from "@/lib/project-types";
 import type { IndexStatus, SitemapCheckResponse, SitemapCheckRow } from "@/lib/sitemap-check";
@@ -26,6 +39,7 @@ type SettingsForm = {
   dataForSeoLocationName: string;
   dataForSeoLogin: string;
   dataForSeoPassword: string;
+  defaultNotificationEmail: string;
   googleServiceAccountFile: string;
   googleServiceAccountJson: string;
   gscLanguageCode: string;
@@ -34,12 +48,20 @@ type SettingsForm = {
   serpApiKey: string;
   serpQueryStrategy: string;
   serperApiKey: string;
+  smtpFromEmail: string;
+  smtpHost: string;
+  smtpPassword: string;
+  smtpPort: string;
+  smtpSecure: boolean;
+  smtpUser: string;
 };
 
 type RunForm = {
   batchSize: string;
   domain: string;
+  excludeRulesText: string;
   gscPropertyUrl: string;
+  notificationEmail: string;
   projectName: string;
   serperGl: string;
   serperHl: string;
@@ -49,7 +71,10 @@ type RunForm = {
 type SavedProjectsResponse = { projects: SavedProject[] };
 type SavedProjectResponse = { project: SavedProject };
 type SavedProjectDetailResponse = { project: SavedProject; runs: SavedRunSummary[] };
-type SavedRunResponse = { project: SavedProject; result: SavedResultResponse; run: SavedRunSummary };
+type SavedRunResponse = { project: SavedProject; result: SavedResultResponse | null; run: SavedRunSummary };
+type CreateSavedRunResponse = { project: SavedProject; run: SavedRunSummary };
+type VerificationResponse = { message: string };
+type VerificationTarget = "SERPER" | "SERPAPI" | "DATAFORSEO" | "SEARXNG" | "GSC_CREDENTIALS" | "SMTP";
 
 const filters = [
   { value: "all", label: "All" },
@@ -63,14 +88,42 @@ const filters = [
 const defaultRunForm = (): RunForm => ({
   batchSize: "5",
   domain: "",
+  excludeRulesText: "",
   gscPropertyUrl: "",
+  notificationEmail: "",
   projectName: "",
   serperGl: "pl",
   serperHl: "pl",
   sitemapUrl: ""
 });
 
+const defaultSettingsForm = (): SettingsForm => ({
+  checkProvider: "AUTO",
+  dataForSeoLanguageCode: "pl",
+  dataForSeoLocationCode: "",
+  dataForSeoLocationName: "",
+  dataForSeoLogin: "",
+  dataForSeoPassword: "",
+  defaultNotificationEmail: "",
+  googleServiceAccountFile: "",
+  googleServiceAccountJson: "",
+  gscLanguageCode: "pl-PL",
+  searxngBaseUrl: "",
+  searxngEngines: "google",
+  serpApiKey: "",
+  serpQueryStrategy: "SITE_THEN_URL",
+  serperApiKey: "",
+  smtpFromEmail: "",
+  smtpHost: "",
+  smtpPassword: "",
+  smtpPort: "587",
+  smtpSecure: false,
+  smtpUser: ""
+});
+
 export function Dashboard() {
+  const [activeRun, setActiveRun] = useState<SavedRunSummary | null>(null);
+  const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [filter, setFilter] = useState<(typeof filters)[number]["value"]>("all");
   const [notice, setNotice] = useState<Notice | null>(null);
@@ -84,32 +137,14 @@ export function Dashboard() {
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [theme, setTheme] = useState<"light" | "dark">("light");
-  const [settingsForm, setSettingsForm] = useState<SettingsForm>({
-    checkProvider: "AUTO",
-    dataForSeoLanguageCode: "pl",
-    dataForSeoLocationCode: "",
-    dataForSeoLocationName: "",
-    dataForSeoLogin: "",
-    dataForSeoPassword: "",
-    googleServiceAccountFile: "",
-    googleServiceAccountJson: "",
-    gscLanguageCode: "pl-PL",
-    searxngBaseUrl: "",
-    searxngEngines: "google",
-    serpApiKey: "",
-    serpQueryStrategy: "SITE_THEN_URL",
-    serperApiKey: ""
-  });
+  const [verificationTarget, setVerificationTarget] = useState<VerificationTarget | null>(null);
+  const [settingsForm, setSettingsForm] = useState<SettingsForm>(defaultSettingsForm);
 
   const settingsRef = useRef<HTMLElement | null>(null);
 
   const loadSettings = useCallback(async () => {
-    try {
-      const data = await requestJson<{ settings: LocalSettings }>("/api/settings");
-      hydrateSettings(data.settings);
-    } catch (error) {
-      setNotice({ text: getErrorMessage(error), tone: "error" });
-    }
+    const data = await requestJson<{ settings: LocalSettings }>("/api/settings");
+    hydrateSettings(data.settings);
   }, []);
 
   useEffect(() => {
@@ -151,13 +186,41 @@ export function Dashboard() {
     [projects, selectedProjectId]
   );
 
+  const activeRunProgress = useMemo(() => {
+    if (!activeRun?.totalUrls) {
+      return 0;
+    }
+    return Math.max(0, Math.min(100, Math.round((activeRun.rowsChecked / activeRun.totalUrls) * 100)));
+  }, [activeRun]);
+
+  const highlightedRunId =
+    activeRunId ?? (result && "runId" in result && typeof result.runId === "string" ? result.runId : null);
+
   const loadSavedRun = useCallback(async (projectId: string, runId: string, showNotice = true) => {
     const data = await requestJson<SavedRunResponse>(`/api/local-projects/${projectId}/runs/${runId}`);
-    setResult(data.result);
+    setActiveRun(data.run.status === "QUEUED" || data.run.status === "RUNNING" ? data.run : null);
+    setActiveRunId(data.run.status === "QUEUED" || data.run.status === "RUNNING" ? data.run.id : null);
+    setRunHistory((current) => upsertRun(current, data.run));
+    setProjects((current) => upsertProject(current, data.project));
+
+    if (data.result) {
+      setResult(data.result);
+      if (showNotice) {
+        setNotice({
+          text: `Loaded saved run from ${new Date(data.run.completedAt || data.run.requestedAt).toLocaleString("pl-PL")}.`,
+          tone: "info"
+        });
+      }
+      return;
+    }
+
     if (showNotice) {
       setNotice({
-        text: `Loaded saved run from ${new Date(data.run.completedAt).toLocaleString("pl-PL")}.`,
-        tone: "info"
+        text:
+          data.run.status === "FAILED"
+            ? data.run.errorMessage || "This run failed."
+            : "This run is still processing in the background.",
+        tone: data.run.status === "FAILED" ? "error" : "info"
       });
     }
   }, []);
@@ -169,9 +232,35 @@ export function Dashboard() {
       hydrateProject(data.project);
       setRunHistory(data.runs);
 
-      if (loadLatestRun && data.runs[0]) {
-        await loadSavedRun(projectId, data.runs[0].id, false);
-      } else if (!data.runs.length) {
+      if (!loadLatestRun) {
+        return;
+      }
+
+      const newestRun = data.runs[0];
+      if (!newestRun) {
+        setActiveRun(null);
+        setActiveRunId(null);
+        setResult(null);
+        return;
+      }
+
+      if (newestRun.status === "QUEUED" || newestRun.status === "RUNNING") {
+        setActiveRun(newestRun);
+        setActiveRunId(newestRun.id);
+        const newestCompleted = data.runs.find((run) => run.status === "COMPLETED");
+        if (newestCompleted) {
+          await loadSavedRun(projectId, newestCompleted.id, false);
+        } else {
+          setResult(null);
+        }
+        return;
+      }
+
+      setActiveRun(null);
+      setActiveRunId(null);
+      if (newestRun.status === "COMPLETED") {
+        await loadSavedRun(projectId, newestRun.id, false);
+      } else {
         setResult(null);
       }
     },
@@ -180,30 +269,90 @@ export function Dashboard() {
 
   const loadProjects = useCallback(
     async (preferredProjectId?: string | null) => {
-      try {
-        const data = await requestJson<SavedProjectsResponse>("/api/local-projects");
-        setProjects(data.projects);
+      const data = await requestJson<SavedProjectsResponse>("/api/local-projects");
+      setProjects(data.projects);
 
-        const candidateId = preferredProjectId ?? null;
-        if (candidateId && data.projects.some((project) => project.id === candidateId)) {
-          await loadProject(candidateId, true);
-        } else if (data.projects[0]) {
-          await loadProject(data.projects[0].id, true);
-        } else {
-          setSelectedProjectId(null);
-          setRunHistory([]);
-        }
-      } catch (error) {
-        setNotice({ text: getErrorMessage(error), tone: "error" });
+      const candidateId = preferredProjectId ?? null;
+      if (candidateId && data.projects.some((project) => project.id === candidateId)) {
+        await loadProject(candidateId, true);
+      } else if (data.projects[0]) {
+        await loadProject(data.projects[0].id, true);
+      } else {
+        setSelectedProjectId(null);
+        setRunHistory([]);
+        setActiveRun(null);
+        setActiveRunId(null);
       }
     },
     [loadProject]
   );
 
   useEffect(() => {
-    void loadSettings();
-    void loadProjects(null);
+    void (async () => {
+      try {
+        await loadSettings();
+        await loadProjects(null);
+      } catch (error) {
+        setNotice({ text: getErrorMessage(error), tone: "error" });
+      }
+    })();
   }, [loadProjects, loadSettings]);
+
+  useEffect(() => {
+    if (!selectedProjectId || !activeRunId) {
+      return;
+    }
+
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const data = await requestJson<SavedRunResponse>(`/api/local-projects/${selectedProjectId}/runs/${activeRunId}`);
+        if (cancelled) {
+          return;
+        }
+
+        setActiveRun(data.run.status === "QUEUED" || data.run.status === "RUNNING" ? data.run : null);
+        setRunHistory((current) => upsertRun(current, data.run));
+        setProjects((current) => upsertProject(current, data.project));
+
+        if (data.run.status === "COMPLETED") {
+          if (data.result) {
+            setResult(data.result);
+          }
+          setActiveRunId(null);
+          setActiveRun(null);
+          setNotice({
+            text: `Run completed for ${data.project.name}. ${data.run.summary.notIndexed} URLs are still not indexed.`,
+            tone: "ok"
+          });
+          return;
+        }
+
+        if (data.run.status === "FAILED") {
+          setActiveRunId(null);
+          setActiveRun(null);
+          setNotice({
+            text: data.run.errorMessage || "The background run failed.",
+            tone: "error"
+          });
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setNotice({ text: getErrorMessage(error), tone: "error" });
+        }
+      }
+    };
+
+    void poll();
+    const interval = window.setInterval(() => {
+      void poll();
+    }, 3000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [activeRunId, selectedProjectId]);
 
   async function maybePersistProject() {
     if (!runForm.projectName.trim()) {
@@ -212,9 +361,11 @@ export function Dashboard() {
 
     const payload = {
       domain: runForm.domain,
+      excludeRules: parseExcludeRulesText(runForm.excludeRulesText),
       gscPropertyUrl: runForm.gscPropertyUrl || inferredGscProperty,
       id: selectedProjectId ?? undefined,
       name: runForm.projectName,
+      notificationEmail: runForm.notificationEmail,
       serperGl: runForm.serperGl,
       serperHl: runForm.serperHl,
       sitemapUrl: runForm.sitemapUrl
@@ -254,18 +405,16 @@ export function Dashboard() {
   async function runCheck(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setBusy(true);
-    setNotice({ text: "Running sitemap check...", tone: "info" });
+    setNotice({ text: "Starting sitemap check...", tone: "info" });
 
     try {
-      let data: SitemapCheckResponse | SavedResultResponse;
-
       if (selectedProjectId || runForm.projectName.trim()) {
         const savedProject = await maybePersistProject();
         if (!savedProject) {
           throw new Error("Could not save the project before running the check.");
         }
 
-        const runData = await requestJson<SavedRunResponse>(`/api/local-projects/${savedProject.id}/runs`, {
+        const runData = await requestJson<CreateSavedRunResponse>(`/api/local-projects/${savedProject.id}/runs`, {
           body: JSON.stringify({
             batchSize: Number.parseInt(runForm.batchSize, 10) || 5,
             mode: runMode
@@ -273,30 +422,35 @@ export function Dashboard() {
           method: "POST"
         });
 
-        data = runData.result;
-        setRunHistory((current) => [runData.run, ...current.filter((run) => run.id !== runData.run.id)]);
+        setRunHistory((current) => upsertRun(current, runData.run));
         setProjects((current) => upsertProject(current, runData.project));
         setSelectedProjectId(runData.project.id);
-      } else {
-        data = await requestJson<SitemapCheckResponse>("/api/check-sitemap", {
-          body: JSON.stringify({
-            batchSize: Number.parseInt(runForm.batchSize, 10) || 5,
-            domain: runForm.domain,
-            gscPropertyUrl: runForm.gscPropertyUrl || inferredGscProperty,
-            serperGl: runForm.serperGl,
-            serperHl: runForm.serperHl,
-            sitemapUrl: runForm.sitemapUrl
-          }),
-          method: "POST"
+        setActiveRun(runData.run);
+        setActiveRunId(runData.run.id);
+        const effectiveNotificationEmail = runForm.notificationEmail.trim() || settings?.defaultNotificationEmail.trim() || "";
+        setNotice({
+          text: `Run queued for ${runData.project.name}. Results will be saved automatically${effectiveNotificationEmail ? " and emailed after completion." : "."}`,
+          tone: "ok"
         });
+        return;
       }
+
+      const data = await requestJson<SitemapCheckResponse>("/api/check-sitemap", {
+        body: JSON.stringify({
+          batchSize: Number.parseInt(runForm.batchSize, 10) || 5,
+          domain: runForm.domain,
+          excludeRules: parseExcludeRulesText(runForm.excludeRulesText),
+          gscPropertyUrl: runForm.gscPropertyUrl || inferredGscProperty,
+          serperGl: runForm.serperGl,
+          serperHl: runForm.serperHl,
+          sitemapUrl: runForm.sitemapUrl
+        }),
+        method: "POST"
+      });
 
       setResult(data);
       setNotice({
-        text:
-          "projectId" in data && data.projectId
-            ? `Saved run completed for ${data.projectName || data.domain}.`
-            : `Checked ${data.summary.total} URLs using ${PROVIDER_LABELS[data.source]}.`,
+        text: `Checked ${data.summary.total} URLs using ${PROVIDER_LABELS[data.source]}.`,
         tone: "ok"
       });
     } catch (error) {
@@ -315,17 +469,26 @@ export function Dashboard() {
     }
   }
 
+  async function persistSettingsForm(showSuccessNotice: boolean) {
+    const data = await requestJson<{ settings: LocalSettings }>("/api/settings", {
+      body: JSON.stringify(settingsForm),
+      method: "POST"
+    });
+    hydrateSettings(data.settings);
+
+    if (showSuccessNotice) {
+      setNotice({ text: "Settings saved to .env.local on the server side.", tone: "ok" });
+    }
+
+    return data.settings;
+  }
+
   async function saveSettings(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setSettingsBusy(true);
 
     try {
-      const data = await requestJson<{ settings: LocalSettings }>("/api/settings", {
-        body: JSON.stringify(settingsForm),
-        method: "POST"
-      });
-      hydrateSettings(data.settings);
-      setNotice({ text: "Settings saved to .env.", tone: "ok" });
+      await persistSettingsForm(true);
     } catch (error) {
       setNotice({ text: getErrorMessage(error), tone: "error" });
     } finally {
@@ -333,7 +496,7 @@ export function Dashboard() {
     }
   }
 
-  async function clearSetting(type: "dataforseo" | "googleJson" | "serpapi" | "serper") {
+  async function clearSetting(type: "dataforseo" | "googleJson" | "serpapi" | "serper" | "smtp") {
     setSettingsBusy(true);
 
     try {
@@ -342,7 +505,8 @@ export function Dashboard() {
           clearDataForSeoCredentials: type === "dataforseo",
           clearGoogleServiceAccountJson: type === "googleJson",
           clearSerpApiKey: type === "serpapi",
-          clearSerperApiKey: type === "serper"
+          clearSerperApiKey: type === "serper",
+          clearSmtpPassword: type === "smtp"
         }),
         method: "POST"
       });
@@ -355,11 +519,32 @@ export function Dashboard() {
     }
   }
 
+  async function verifyIntegration(target: VerificationTarget) {
+    setSettingsBusy(true);
+    setVerificationTarget(target);
+
+    try {
+      await persistSettingsForm(false);
+      const data = await requestJson<VerificationResponse>("/api/settings/verify", {
+        body: JSON.stringify({ target }),
+        method: "POST"
+      });
+      setNotice({ text: data.message, tone: "ok" });
+    } catch (error) {
+      setNotice({ text: getErrorMessage(error), tone: "error" });
+    } finally {
+      setSettingsBusy(false);
+      setVerificationTarget(null);
+    }
+  }
+
   function hydrateProject(project: SavedProject) {
     setRunForm((current) => ({
       ...current,
       domain: project.domain,
+      excludeRulesText: serializeExcludeRules(project.excludeRules),
       gscPropertyUrl: project.gscPropertyUrl,
+      notificationEmail: project.notificationEmail,
       projectName: project.name,
       serperGl: project.serperGl,
       serperHl: project.serperHl,
@@ -376,6 +561,7 @@ export function Dashboard() {
       dataForSeoLocationName: nextSettings.dataForSeoLocationName || "",
       dataForSeoLogin: "",
       dataForSeoPassword: "",
+      defaultNotificationEmail: nextSettings.defaultNotificationEmail || "",
       googleServiceAccountFile: nextSettings.googleServiceAccountFile || "",
       googleServiceAccountJson: "",
       gscLanguageCode: nextSettings.gscLanguageCode || "pl-PL",
@@ -383,7 +569,13 @@ export function Dashboard() {
       searxngEngines: nextSettings.searxngEngines || "google",
       serpApiKey: "",
       serpQueryStrategy: nextSettings.serpQueryStrategy,
-      serperApiKey: ""
+      serperApiKey: "",
+      smtpFromEmail: nextSettings.smtpFromEmail || "",
+      smtpHost: nextSettings.smtpHost || "",
+      smtpPassword: "",
+      smtpPort: nextSettings.smtpPort || "587",
+      smtpSecure: nextSettings.smtpSecure,
+      smtpUser: ""
     });
   }
 
@@ -428,6 +620,9 @@ export function Dashboard() {
     setRunForm(defaultRunForm());
     setRunHistory([]);
     setResult(null);
+    setActiveRun(null);
+    setActiveRunId(null);
+    setRunMode("ALL_URLS");
     setNotice({ text: "Started a fresh unsaved project.", tone: "info" });
   }
 
@@ -538,6 +733,28 @@ export function Dashboard() {
                   {inferredGscProperty ? `Auto: ${inferredGscProperty}` : "Auto-filled from domain or sitemap URL"}
                 </span>
               </label>
+              <label>
+                Notification email (optional)
+                <input
+                  onChange={(event) => setRunForm({ ...runForm, notificationEmail: event.target.value })}
+                  placeholder={settings?.defaultNotificationEmail || "alerts@example.com"}
+                  value={runForm.notificationEmail}
+                />
+                <span className="form-hint">
+                  Leave blank to use the default notification email from Settings, if one is configured.
+                </span>
+              </label>
+              <label>
+                Exclude rules
+                <textarea
+                  onChange={(event) => setRunForm({ ...runForm, excludeRulesText: event.target.value })}
+                  placeholder={"One rule per line\n# comments are ignored\nhttps://example.com/tag/*"}
+                  value={runForm.excludeRulesText}
+                />
+                <span className="form-hint">
+                  Exact URL match or prefix match with a trailing <code>*</code>. Useful when the sitemap contains junk URLs.
+                </span>
+              </label>
               <div className="inline-fields inline-fields-3">
                 <label>
                   Batch size
@@ -560,13 +777,13 @@ export function Dashboard() {
                 Run mode
                 <select onChange={(event) => setRunMode(event.target.value as SavedRunMode)} value={runMode}>
                   <option value="ALL_URLS">All URLs from sitemap</option>
-                  <option value="LAST_NOT_INDEXED">Only URLs that were not indexed in the last run</option>
+                  <option value="LAST_NOT_INDEXED">Only URLs that were not indexed in the last completed run</option>
                 </select>
               </label>
               <div className="helper-box">
                 {selectedProject
-                  ? `Runs for this project will be saved locally. Last source: ${selectedProject.lastRunSource ? PROVIDER_LABELS[selectedProject.lastRunSource] : "none yet"}.`
-                  : "If you add a project name, the app will save this project locally before the run so you can come back to it later."}
+                  ? `Runs for this project are saved locally. Last source: ${selectedProject.lastRunSource ? PROVIDER_LABELS[selectedProject.lastRunSource] : "none yet"}.`
+                  : "If you add a project name, the app will save this project locally before the run so you can come back later and refresh only the URLs that still were not indexed."}
               </div>
               <div className="button-row">
                 <button className="button secondary" onClick={() => void saveCurrentProject()} type="button">
@@ -575,7 +792,7 @@ export function Dashboard() {
                 </button>
                 <button className="button primary" disabled={busy} type="submit">
                   <Play size={16} />
-                  {busy ? "Checking..." : "Run check"}
+                  {busy ? "Starting..." : "Run check"}
                 </button>
               </div>
             </form>
@@ -590,21 +807,23 @@ export function Dashboard() {
               {runHistory.map((run) => (
                 <button
                   key={run.id}
-                  className={
-                    result && "runId" in result && result.runId === run.id ? "history-row active" : "history-row"
-                  }
+                  className={highlightedRunId === run.id ? "history-row active" : "history-row"}
                   onClick={() => void loadSavedRun(run.projectId, run.id)}
                   type="button"
                 >
                   <div>
-                    <strong>{new Date(run.completedAt).toLocaleString("pl-PL")}</strong>
+                    <strong>{new Date(run.completedAt || run.requestedAt).toLocaleString("pl-PL")}</strong>
                     <span>
                       {run.mode === "LAST_NOT_INDEXED" ? "Only previous not indexed" : "Full sitemap"} | {PROVIDER_LABELS[run.source]}
                     </span>
                   </div>
                   <div className="history-metrics">
-                    <span>{run.summary.notIndexed} not indexed</span>
-                    <span>{run.changedCount} changed</span>
+                    <span>{formatRunStatus(run.status)}</span>
+                    <span>
+                      {run.status === "COMPLETED"
+                        ? `${run.summary.notIndexed} not indexed`
+                        : `${run.rowsChecked}/${run.totalUrls || "?"} checked`}
+                    </span>
                   </div>
                 </button>
               ))}
@@ -634,7 +853,7 @@ export function Dashboard() {
             </div>
             <div className="helper-box compact">
               {settings?.resolvedProvider
-                ? `Current configuration will run checks through ${PROVIDER_LABELS[settings.resolvedProvider]}.`
+                ? `Current configuration will run checks through ${PROVIDER_LABELS[settings.resolvedProvider]}. Secrets are stored server-side in .env.local and the UI only shows masked hints.`
                 : settings?.resolvedProviderError || "Configure at least one provider to enable checks."}
             </div>
             {!!configuredProviderLabels.length ? (
@@ -707,7 +926,7 @@ export function Dashboard() {
                       value={settingsForm.googleServiceAccountJson}
                     />
                   </label>
-                  <div className="settings-actions-row">
+                  <div className="button-row">
                     <button
                       className="button secondary"
                       disabled={!settings?.hasGoogleServiceAccountJson || settingsBusy}
@@ -715,6 +934,15 @@ export function Dashboard() {
                       type="button"
                     >
                       Clear inline GSC JSON
+                    </button>
+                    <button
+                      className="button secondary"
+                      disabled={settingsBusy}
+                      onClick={() => void verifyIntegration("GSC_CREDENTIALS")}
+                      type="button"
+                    >
+                      <ShieldCheck size={16} />
+                      {verificationTarget === "GSC_CREDENTIALS" ? "Verifying..." : "Save and verify"}
                     </button>
                   </div>
                   <label>
@@ -737,13 +965,14 @@ export function Dashboard() {
                     <input
                       onChange={(event) => setSettingsForm({ ...settingsForm, serperApiKey: event.target.value })}
                       placeholder={settings?.hasSerperApiKey ? "Configured - enter a new key to replace it" : "Paste Serper API key"}
+                      type="password"
                       value={settingsForm.serperApiKey}
                     />
                     <span className="form-hint">
                       {settings?.serperApiKeyHint ? `Current: ${settings.serperApiKeyHint}` : "No Serper key saved yet."}
                     </span>
                   </label>
-                  <div className="settings-actions-row">
+                  <div className="button-row">
                     <button
                       className="button secondary"
                       disabled={!settings?.hasSerperApiKey || settingsBusy}
@@ -752,6 +981,15 @@ export function Dashboard() {
                     >
                       Clear Serper
                     </button>
+                    <button
+                      className="button secondary"
+                      disabled={settingsBusy}
+                      onClick={() => void verifyIntegration("SERPER")}
+                      type="button"
+                    >
+                      <ShieldCheck size={16} />
+                      {verificationTarget === "SERPER" ? "Verifying..." : "Save and verify"}
+                    </button>
                   </div>
 
                   <label>
@@ -759,13 +997,14 @@ export function Dashboard() {
                     <input
                       onChange={(event) => setSettingsForm({ ...settingsForm, serpApiKey: event.target.value })}
                       placeholder={settings?.hasSerpApiKey ? "Configured - enter a new key to replace it" : "Paste SerpApi key"}
+                      type="password"
                       value={settingsForm.serpApiKey}
                     />
                     <span className="form-hint">
                       {settings?.serpApiKeyHint ? `Current: ${settings.serpApiKeyHint}` : "No SerpApi key saved yet."}
                     </span>
                   </label>
-                  <div className="settings-actions-row">
+                  <div className="button-row">
                     <button
                       className="button secondary"
                       disabled={!settings?.hasSerpApiKey || settingsBusy}
@@ -773,6 +1012,15 @@ export function Dashboard() {
                       type="button"
                     >
                       Clear SerpApi
+                    </button>
+                    <button
+                      className="button secondary"
+                      disabled={settingsBusy}
+                      onClick={() => void verifyIntegration("SERPAPI")}
+                      type="button"
+                    >
+                      <ShieldCheck size={16} />
+                      {verificationTarget === "SERPAPI" ? "Verifying..." : "Save and verify"}
                     </button>
                   </div>
 
@@ -824,7 +1072,7 @@ export function Dashboard() {
                       />
                     </label>
                   </div>
-                  <div className="settings-actions-row">
+                  <div className="button-row">
                     <button
                       className="button secondary"
                       disabled={!settings?.hasDataForSeoCredentials || settingsBusy}
@@ -832,6 +1080,15 @@ export function Dashboard() {
                       type="button"
                     >
                       Clear DataForSEO login and password
+                    </button>
+                    <button
+                      className="button secondary"
+                      disabled={settingsBusy}
+                      onClick={() => void verifyIntegration("DATAFORSEO")}
+                      type="button"
+                    >
+                      <ShieldCheck size={16} />
+                      {verificationTarget === "DATAFORSEO" ? "Verifying..." : "Save and verify"}
                     </button>
                   </div>
                 </div>
@@ -860,6 +1117,104 @@ export function Dashboard() {
                       Leave blank to use the instance default. Google is a common engine choice if the instance exposes it.
                     </span>
                   </label>
+                  <div className="button-row">
+                    <button
+                      className="button secondary"
+                      disabled={settingsBusy}
+                      onClick={() => void verifyIntegration("SEARXNG")}
+                      type="button"
+                    >
+                      <ShieldCheck size={16} />
+                      {verificationTarget === "SEARXNG" ? "Verifying..." : "Save and verify"}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="settings-section">
+                  <div className="settings-section-header">
+                    <h3>Email notifications</h3>
+                    <p>Optional. Used only for background project runs after the whole project finishes.</p>
+                  </div>
+                  <label>
+                    Default notification email
+                    <input
+                      onChange={(event) => setSettingsForm({ ...settingsForm, defaultNotificationEmail: event.target.value })}
+                      placeholder="alerts@example.com"
+                      value={settingsForm.defaultNotificationEmail}
+                    />
+                  </label>
+                  <div className="settings-subgrid">
+                    <label>
+                      SMTP host
+                      <input
+                        onChange={(event) => setSettingsForm({ ...settingsForm, smtpHost: event.target.value })}
+                        placeholder="smtp.example.com"
+                        value={settingsForm.smtpHost}
+                      />
+                    </label>
+                    <label>
+                      SMTP port
+                      <input
+                        onChange={(event) => setSettingsForm({ ...settingsForm, smtpPort: event.target.value })}
+                        placeholder="587"
+                        value={settingsForm.smtpPort}
+                      />
+                    </label>
+                  </div>
+                  <div className="settings-subgrid">
+                    <label>
+                      SMTP user
+                      <input
+                        onChange={(event) => setSettingsForm({ ...settingsForm, smtpUser: event.target.value })}
+                        placeholder={settings?.smtpUserHint ? `Configured - ${settings.smtpUserHint}` : "smtp-user"}
+                        value={settingsForm.smtpUser}
+                      />
+                    </label>
+                    <label>
+                      SMTP password
+                      <input
+                        onChange={(event) => setSettingsForm({ ...settingsForm, smtpPassword: event.target.value })}
+                        placeholder={settings?.hasSmtpConfig ? "Configured - enter a new password to replace it" : "SMTP password"}
+                        type="password"
+                        value={settingsForm.smtpPassword}
+                      />
+                    </label>
+                  </div>
+                  <label>
+                    SMTP from email
+                    <input
+                      onChange={(event) => setSettingsForm({ ...settingsForm, smtpFromEmail: event.target.value })}
+                      placeholder="no-reply@example.com"
+                      value={settingsForm.smtpFromEmail}
+                    />
+                  </label>
+                  <label className="checkbox-field">
+                    <input
+                      checked={settingsForm.smtpSecure}
+                      onChange={(event) => setSettingsForm({ ...settingsForm, smtpSecure: event.target.checked })}
+                      type="checkbox"
+                    />
+                    <span>Use TLS / secure SMTP</span>
+                  </label>
+                  <div className="button-row">
+                    <button
+                      className="button secondary"
+                      disabled={!settings?.hasSmtpConfig || settingsBusy}
+                      onClick={() => void clearSetting("smtp")}
+                      type="button"
+                    >
+                      Clear SMTP password
+                    </button>
+                    <button
+                      className="button secondary"
+                      disabled={settingsBusy}
+                      onClick={() => void verifyIntegration("SMTP")}
+                      type="button"
+                    >
+                      <ShieldCheck size={16} />
+                      {verificationTarget === "SMTP" ? "Verifying..." : "Save and verify"}
+                    </button>
+                  </div>
                 </div>
 
                 <button className="button primary" disabled={settingsBusy} type="submit">
@@ -894,12 +1249,35 @@ export function Dashboard() {
             {result ? (
               <div className="actions compact-actions">
                 <StatusPill tone="muted">Provider: {PROVIDER_LABELS[result.source]}</StatusPill>
-                {"changedCount" in result && result.changedCount ? (
-                  <StatusPill tone="warn">{result.changedCount} changed</StatusPill>
-                ) : null}
+                {"changedCount" in result && result.changedCount ? <StatusPill tone="warn">{result.changedCount} changed</StatusPill> : null}
               </div>
             ) : null}
           </div>
+
+          {activeRun ? (
+            <div className="run-bar">
+              <div>
+                <span>Status</span>
+                <StatusPill tone={runStatusTone(activeRun.status)}>{formatRunStatus(activeRun.status)}</StatusPill>
+              </div>
+              <div>
+                <span>Progress</span>
+                <div className="progress-track">
+                  <div className="progress-fill" style={{ width: `${activeRunProgress}%` }} />
+                </div>
+              </div>
+              <div>
+                <span>Checked</span>
+                <strong>
+                  {activeRun.rowsChecked}/{activeRun.totalUrls || "?"}
+                </strong>
+              </div>
+              <div>
+                <span>Started</span>
+                <strong>{new Date(activeRun.startedAt || activeRun.requestedAt).toLocaleTimeString("pl-PL")}</strong>
+              </div>
+            </div>
+          ) : null}
 
           {notice ? (
             <div className={`notice ${notice.tone}`}>
@@ -915,7 +1293,7 @@ export function Dashboard() {
           {result ? (
             <div className="run-summary-bar">
               <div className="summary-chip">
-                <span>Total</span>
+                <span>Total checked</span>
                 <strong>{result.summary.total}</strong>
               </div>
               <div className="summary-chip">
@@ -1051,6 +1429,19 @@ function formatRunMode(mode: SavedRunMode) {
   return mode === "LAST_NOT_INDEXED" ? "refreshing only previously not indexed URLs" : "full sitemap run";
 }
 
+function formatRunStatus(status: SavedRunSummary["status"]) {
+  if (status === "QUEUED") {
+    return "Queued";
+  }
+  if (status === "RUNNING") {
+    return "Running";
+  }
+  if (status === "FAILED") {
+    return "Failed";
+  }
+  return "Completed";
+}
+
 function statusTone(status: IndexStatus): "ok" | "bad" | "muted" | "warn" {
   if (status === "INDEXED") {
     return "ok";
@@ -1064,9 +1455,27 @@ function statusTone(status: IndexStatus): "ok" | "bad" | "muted" | "warn" {
   return "muted";
 }
 
+function runStatusTone(status: SavedRunSummary["status"]): "ok" | "bad" | "muted" | "warn" {
+  if (status === "COMPLETED") {
+    return "ok";
+  }
+  if (status === "FAILED") {
+    return "bad";
+  }
+  if (status === "RUNNING") {
+    return "warn";
+  }
+  return "muted";
+}
+
 function upsertProject(projects: SavedProject[], project: SavedProject) {
   const next = [...projects.filter((entry) => entry.id !== project.id), project];
   return next.sort((left, right) => (right.lastRunAt || right.updatedAt).localeCompare(left.lastRunAt || left.updatedAt));
+}
+
+function upsertRun(runs: SavedRunSummary[], run: SavedRunSummary) {
+  const next = [...runs.filter((entry) => entry.id !== run.id), run];
+  return next.sort((left, right) => (right.requestedAt || right.createdAt).localeCompare(left.requestedAt || left.createdAt));
 }
 
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {

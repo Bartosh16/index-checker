@@ -11,6 +11,7 @@ import { inspectGoogleIndex } from "@/lib/gsc";
 import { checkSearxngVisibility } from "@/lib/searxng";
 import { checkSerpApiVisibility } from "@/lib/serpapi";
 import { checkSerpVisibility } from "@/lib/serper";
+import { filterExcludedUrls } from "@/lib/exclude-rules";
 import { collectSitemapUrls } from "@/lib/sitemap";
 import { getIntegerEnv, getOptionalEnv } from "@/lib/env";
 import { inferGscPropertyUrl, normalizeDomain, normalizeUrlForComparison } from "@/lib/url";
@@ -43,6 +44,7 @@ export type SitemapCheckSummary = {
 export type SitemapCheckResponse = {
   changedCount?: number;
   domain: string;
+  excludedCount?: number;
   gscPropertyUrl: string | null;
   previousRunId?: string | null;
   projectId?: string | null;
@@ -53,11 +55,13 @@ export type SitemapCheckResponse = {
   sitemapUrl: string;
   source: IndexCheckSource;
   summary: SitemapCheckSummary;
+  totalCandidates?: number;
 };
 
 export type RunSitemapCheckInput = {
   batchSize?: number;
   domain?: string;
+  excludeRules?: string[];
   gscPropertyUrl?: string;
   restrictToUrls?: string[];
   serperGl?: string;
@@ -82,7 +86,10 @@ export async function runSitemapCheck(input: RunSitemapCheckInput): Promise<Site
   const source = resolveCheckProvider();
   const gscPropertyUrl = source === "GSC" ? normalizeGscProperty(input.gscPropertyUrl, domain) : null;
   const serpQueryStrategy = resolveSerpQueryStrategy();
-  const urls = filterEntries(await collectSitemapUrls(sitemapUrl, domain), input.restrictToUrls);
+  const collected = await collectSitemapUrls(sitemapUrl, domain);
+  const restricted = filterEntries(collected, input.restrictToUrls);
+  const filtered = filterExcludedUrls(restricted, input.excludeRules ?? []);
+  const urls = filtered.items;
   const batchSize = normalizeBatchSize(input.batchSize);
   const rows = await mapWithConcurrency(urls, batchSize, async (entry) => {
     if (source === "GSC") {
@@ -123,11 +130,13 @@ export async function runSitemapCheck(input: RunSitemapCheckInput): Promise<Site
 
   return {
     domain,
+    excludedCount: filtered.excludedCount,
     gscPropertyUrl,
     rows,
     sitemapUrl,
     source,
-    summary: summarizeRows(rows)
+    summary: summarizeRows(rows),
+    totalCandidates: restricted.length
   };
 }
 

@@ -8,11 +8,13 @@ type SaveSettingsBody = {
   clearGoogleServiceAccountJson?: boolean;
   clearSerpApiKey?: boolean;
   clearSerperApiKey?: boolean;
+  clearSmtpPassword?: boolean;
   dataForSeoLanguageCode?: string;
   dataForSeoLocationCode?: string;
   dataForSeoLocationName?: string;
   dataForSeoLogin?: string;
   dataForSeoPassword?: string;
+  defaultNotificationEmail?: string;
   googleServiceAccountFile?: string;
   googleServiceAccountJson?: string;
   gscLanguageCode?: string;
@@ -21,6 +23,12 @@ type SaveSettingsBody = {
   serpApiKey?: string;
   serpQueryStrategy?: string;
   serperApiKey?: string;
+  smtpFromEmail?: string;
+  smtpHost?: string;
+  smtpPassword?: string;
+  smtpPort?: string;
+  smtpSecure?: boolean;
+  smtpUser?: string;
 };
 
 export async function GET() {

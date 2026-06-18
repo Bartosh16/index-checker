@@ -24,6 +24,9 @@ export async function POST(request: Request) {
     if (!body.sitemapUrl?.trim()) {
       return jsonError("Sitemap URL is required.");
     }
+    if (body.notificationEmail?.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(body.notificationEmail.trim())) {
+      return jsonError("Notification email must be a valid email address.");
+    }
 
     const project = await saveProject(body);
     return NextResponse.json({ project }, { status: body.id ? 200 : 201 });
