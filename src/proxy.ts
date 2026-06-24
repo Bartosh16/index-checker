@@ -1,11 +1,23 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { AUTH_COOKIE_NAME, isAuthEnabled, verifyAuthCookieValue } from "@/lib/auth";
+import { AUTH_COOKIE_NAME, isAuthConfigured, verifyAuthCookieValue } from "@/lib/auth";
 
-const PUBLIC_PATHS = ["/login", "/api/auth/login", "/_next", "/favicon.ico"];
+const PUBLIC_PATHS = ["/login", "/api/auth/login", "/api/auth/reset", "/api/auth/setup", "/api/auth/status", "/_next", "/favicon.ico"];
 
 export async function proxy(request: NextRequest) {
-  if (!isAuthEnabled() || isPublicPath(request.nextUrl.pathname)) {
+  if (isPublicPath(request.nextUrl.pathname)) {
     return NextResponse.next();
+  }
+
+  if (!isAuthConfigured()) {
+    if (request.nextUrl.pathname.startsWith("/api/")) {
+      return NextResponse.json({ error: "Admin password is not configured." }, { status: 401 });
+    }
+
+    const setupUrl = request.nextUrl.clone();
+    setupUrl.pathname = "/login";
+    setupUrl.searchParams.set("setup", "1");
+    setupUrl.searchParams.set("next", `${request.nextUrl.pathname}${request.nextUrl.search}`);
+    return NextResponse.redirect(setupUrl);
   }
 
   const isAuthenticated = await verifyAuthCookieValue(request.cookies.get(AUTH_COOKIE_NAME)?.value);

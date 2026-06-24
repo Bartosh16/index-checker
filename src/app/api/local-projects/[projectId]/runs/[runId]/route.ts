@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { jsonError, readJson } from "@/lib/api";
-import { stopSavedRun } from "@/lib/local-runner";
+import { ensureSavedRunsLaunched, stopSavedRun } from "@/lib/local-runner";
 import { buildSavedResultResponse, deleteSavedRun, getSavedProject, getSavedRun } from "@/lib/project-store";
 
 type UpdateRunBody = {
@@ -14,6 +14,7 @@ export async function GET(
   const { projectId, runId } = await params;
 
   try {
+    await ensureSavedRunsLaunched();
     const [project, run] = await Promise.all([getSavedProject(projectId), getSavedRun(projectId, runId)]);
     if (!project || !run) {
       return jsonError("Run not found.", 404);

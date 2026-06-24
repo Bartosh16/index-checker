@@ -38,7 +38,9 @@ type Notice = {
 };
 
 type SettingsForm = {
+  confirmAdminPassword: string;
   checkProvider: string;
+  currentAdminPassword: string;
   dataForSeoLanguageCode: string;
   dataForSeoLocationCode: string;
   dataForSeoLocationName: string;
@@ -48,6 +50,8 @@ type SettingsForm = {
   googleServiceAccountFile: string;
   googleServiceAccountJson: string;
   gscLanguageCode: string;
+  newAdminPassword: string;
+  passwordResetToken: string;
   searxngBaseUrl: string;
   searxngEngines: string;
   serpApiKey: string;
@@ -80,10 +84,11 @@ type SavedRunResponse = { project: SavedProject; result: SavedResultResponse | n
 type CreateSavedRunResponse = { project: SavedProject; run: SavedRunSummary };
 type VerificationResponse = { message: string };
 type VerificationTarget = "SERPER" | "SERPAPI" | "DATAFORSEO" | "SEARXNG" | "GSC_CREDENTIALS" | "SMTP";
+type AuthStatusResponse = { configured: boolean; enabled: boolean; resetAvailable: boolean };
 
 type FilterValue = (typeof filters)[number]["value"];
 type PanelKey = "projects" | "run" | "history" | "settings";
-type SettingsSectionKey = "execution" | "gsc" | "serper" | "serpapi" | "dataforseo" | "searxng" | "email";
+type SettingsSectionKey = "admin" | "execution" | "gsc" | "serper" | "serpapi" | "dataforseo" | "searxng" | "email";
 
 const filters = [
   { value: "all", label: "Wszystkie" },
@@ -109,7 +114,9 @@ const defaultRunForm = (): RunForm => ({
 });
 
 const defaultSettingsForm = (): SettingsForm => ({
+  confirmAdminPassword: "",
   checkProvider: "AUTO",
+  currentAdminPassword: "",
   dataForSeoLanguageCode: "pl",
   dataForSeoLocationCode: "",
   dataForSeoLocationName: "",
@@ -119,6 +126,8 @@ const defaultSettingsForm = (): SettingsForm => ({
   googleServiceAccountFile: "",
   googleServiceAccountJson: "",
   gscLanguageCode: "pl-PL",
+  newAdminPassword: "",
+  passwordResetToken: "",
   searxngBaseUrl: "",
   searxngEngines: "google",
   serpApiKey: "",
@@ -136,6 +145,7 @@ export function Dashboard() {
   const [activeRun, setActiveRun] = useState<SavedRunSummary | null>(null);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [authEnabled, setAuthEnabled] = useState(false);
+  const [authResetAvailable, setAuthResetAvailable] = useState(false);
   const [busy, setBusy] = useState(false);
   const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null);
   const [deletingRunId, setDeletingRunId] = useState<string | null>(null);
@@ -149,6 +159,7 @@ export function Dashboard() {
     settings: false
   });
   const [openSettingsSections, setOpenSettingsSections] = useState<Record<SettingsSectionKey, boolean>>({
+    admin: false,
     dataforseo: false,
     email: false,
     execution: true,
@@ -343,8 +354,11 @@ export function Dashboard() {
         await Promise.all([
           loadSettings(),
           loadProjects(null),
-          requestJson<{ enabled: boolean }>("/api/auth/status")
-            .then((data) => setAuthEnabled(data.enabled))
+          requestJson<AuthStatusResponse>("/api/auth/status")
+            .then((data) => {
+              setAuthEnabled(data.enabled);
+              setAuthResetAvailable(data.resetAvailable);
+            })
             .catch(() => setAuthEnabled(false))
         ]);
       } catch (error) {
@@ -489,6 +503,29 @@ export function Dashboard() {
       });
       setNotice({ text: "Wpis historii został usunięty.", tone: "ok" });
       await loadProject(run.projectId, true);
+    } catch (error) {
+      setNotice({ text: getErrorMessage(error), tone: "error" });
+    } finally {
+      setDeletingRunId(null);
+    }
+  }
+
+  async function deleteAllRuns() {
+    if (!selectedProjectId || !window.confirm("Usunąć całą historię skanów tego projektu?")) {
+      return;
+    }
+
+    setDeletingRunId("all");
+    try {
+      await requestJson<{ project: SavedProject }>(`/api/local-projects/${selectedProjectId}/runs`, {
+        method: "DELETE"
+      });
+      setRunHistory([]);
+      setResult(null);
+      setActiveRun(null);
+      setActiveRunId(null);
+      setNotice({ text: "Cała historia skanów projektu została usunięta.", tone: "ok" });
+      await loadProjects(selectedProjectId);
     } catch (error) {
       setNotice({ text: getErrorMessage(error), tone: "error" });
     } finally {
@@ -670,6 +707,60 @@ export function Dashboard() {
     }
   }
 
+  async function changeAdminPassword() {
+    if (!settingsForm.currentAdminPassword || !settingsForm.newAdminPassword) {
+      setNotice({ text: "Podaj obecne i nowe hasło administratora.", tone: "error" });
+      return;
+    }
+    if (settingsForm.newAdminPassword !== settingsForm.confirmAdminPassword) {
+      setNotice({ text: "Nowe hasła nie są takie same.", tone: "error" });
+      return;
+    }
+
+    setSettingsBusy(true);
+    try {
+      await requestJson<{ ok: true }>("/api/auth/password", {
+        body: JSON.stringify({
+          currentPassword: settingsForm.currentAdminPassword,
+          newPassword: settingsForm.newAdminPassword
+        }),
+        method: "PATCH"
+      });
+      setSettingsForm((current) => ({
+        ...current,
+        confirmAdminPassword: "",
+        currentAdminPassword: "",
+        newAdminPassword: ""
+      }));
+      setNotice({ text: "Hasło administratora zostało zmienione.", tone: "ok" });
+    } catch (error) {
+      setNotice({ text: getErrorMessage(error), tone: "error" });
+    } finally {
+      setSettingsBusy(false);
+    }
+  }
+
+  async function saveAdminResetToken() {
+    setSettingsBusy(true);
+    try {
+      const nextToken = settingsForm.passwordResetToken.trim();
+      await requestJson<{ ok: true }>("/api/auth/password", {
+        body: JSON.stringify({ resetToken: nextToken }),
+        method: "PATCH"
+      });
+      setAuthResetAvailable(Boolean(nextToken));
+      setSettingsForm((current) => ({ ...current, passwordResetToken: "" }));
+      setNotice({
+        text: nextToken ? "Token resetu hasła został zapisany." : "Token resetu hasła został wyczyszczony.",
+        tone: "ok"
+      });
+    } catch (error) {
+      setNotice({ text: getErrorMessage(error), tone: "error" });
+    } finally {
+      setSettingsBusy(false);
+    }
+  }
+
   async function logout() {
     await fetch("/api/auth/logout", { method: "POST" }).catch(() => undefined);
     window.location.assign("/login");
@@ -705,7 +796,9 @@ export function Dashboard() {
   function hydrateSettings(nextSettings: LocalSettings) {
     setSettings(nextSettings);
     setSettingsForm({
+      confirmAdminPassword: "",
       checkProvider: nextSettings.checkProvider,
+      currentAdminPassword: "",
       dataForSeoLanguageCode: nextSettings.dataForSeoLanguageCode || "pl",
       dataForSeoLocationCode: nextSettings.dataForSeoLocationCode || "",
       dataForSeoLocationName: nextSettings.dataForSeoLocationName || "",
@@ -715,6 +808,8 @@ export function Dashboard() {
       googleServiceAccountFile: nextSettings.googleServiceAccountFile || "",
       googleServiceAccountJson: "",
       gscLanguageCode: nextSettings.gscLanguageCode || "pl-PL",
+      newAdminPassword: "",
+      passwordResetToken: "",
       searxngBaseUrl: nextSettings.searxngBaseUrl || "",
       searxngEngines: nextSettings.searxngEngines || "google",
       serpApiKey: "",
@@ -971,6 +1066,19 @@ export function Dashboard() {
             onToggle={() => togglePanel("history")}
             title="Historia skanów"
           >
+            {runHistory.length ? (
+              <div className="button-row">
+                <button
+                  className="button secondary"
+                  disabled={deletingRunId === "all" || runHistory.some((run) => run.status === "RUNNING" || run.status === "QUEUED")}
+                  onClick={() => void deleteAllRuns()}
+                  type="button"
+                >
+                  <Trash2 size={16} />
+                  Usuń całą historię
+                </button>
+              </div>
+            ) : null}
             <div className="history-list">
               {visibleRunHistory.map((run) => (
                 <div key={run.id} className={highlightedRunId === run.id ? "history-row active" : "history-row"}>
@@ -1039,6 +1147,64 @@ export function Dashboard() {
             ) : null}
             {showSettings || !settings?.resolvedProvider ? (
               <form className="project-form" onSubmit={saveSettings}>
+                <SettingsAccordion
+                  isOpen={openSettingsSections.admin}
+                  onToggle={() => toggleSettingsSection("admin")}
+                  title="Administrator"
+                >
+                  <div className="settings-subgrid">
+                    <label>
+                      Obecne hasło
+                      <input
+                        autoComplete="current-password"
+                        onChange={(event) => setSettingsForm({ ...settingsForm, currentAdminPassword: event.target.value })}
+                        type="password"
+                        value={settingsForm.currentAdminPassword}
+                      />
+                    </label>
+                    <label>
+                      Nowe hasło
+                      <input
+                        autoComplete="new-password"
+                        onChange={(event) => setSettingsForm({ ...settingsForm, newAdminPassword: event.target.value })}
+                        type="password"
+                        value={settingsForm.newAdminPassword}
+                      />
+                    </label>
+                  </div>
+                  <label>
+                    Powtórz nowe hasło
+                    <input
+                      autoComplete="new-password"
+                      onChange={(event) => setSettingsForm({ ...settingsForm, confirmAdminPassword: event.target.value })}
+                      type="password"
+                      value={settingsForm.confirmAdminPassword}
+                    />
+                  </label>
+                  <div className="button-row">
+                    <button className="button secondary" disabled={settingsBusy} onClick={() => void changeAdminPassword()} type="button">
+                      Zmień hasło
+                    </button>
+                  </div>
+                  <label>
+                    Token resetu hasła
+                    <input
+                      onChange={(event) => setSettingsForm({ ...settingsForm, passwordResetToken: event.target.value })}
+                      placeholder={authResetAvailable ? "Token ustawiony - wpisz nowy, aby podmienić" : "Minimum 12 znaków"}
+                      type="password"
+                      value={settingsForm.passwordResetToken}
+                    />
+                    <span className="form-hint">
+                      Token pozwala zresetować hasło z ekranu logowania, gdy nie pamiętasz obecnego hasła.
+                    </span>
+                  </label>
+                  <div className="button-row">
+                    <button className="button secondary" disabled={settingsBusy} onClick={() => void saveAdminResetToken()} type="button">
+                      {settingsForm.passwordResetToken.trim() ? "Zapisz token resetu" : "Wyczyść token resetu"}
+                    </button>
+                  </div>
+                </SettingsAccordion>
+
                 <SettingsAccordion
                   isOpen={openSettingsSections.execution}
                   onToggle={() => toggleSettingsSection("execution")}

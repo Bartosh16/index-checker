@@ -2,8 +2,8 @@ import { NextResponse } from "next/server";
 import { jsonError, readJson } from "@/lib/api";
 import { resolveCheckProvider } from "@/lib/sitemap-check";
 import { readLocalSettings } from "@/lib/local-settings";
-import { launchSavedRun } from "@/lib/local-runner";
-import { createSavedRun, getProjectTargetsFromLastRun, getSavedProject, listSavedRuns } from "@/lib/project-store";
+import { ensureSavedRunsLaunched, launchSavedRun } from "@/lib/local-runner";
+import { createSavedRun, deleteSavedRuns, getProjectTargetsFromLastRun, getSavedProject, listSavedRuns } from "@/lib/project-store";
 import type { SavedRunMode } from "@/lib/project-types";
 
 type CreateRunBody = {
@@ -15,6 +15,7 @@ export async function GET(_request: Request, { params }: { params: Promise<{ pro
   const { projectId } = await params;
 
   try {
+    await ensureSavedRunsLaunched();
     const runs = await listSavedRuns(projectId);
     return NextResponse.json({ runs });
   } catch {
@@ -51,5 +52,20 @@ export async function POST(request: Request, { params }: { params: Promise<{ pro
     return NextResponse.json({ project, run }, { status: 201 });
   } catch (error) {
     return jsonError(error instanceof Error ? error.message : "Could not run saved project.", 400);
+  }
+}
+
+export async function DELETE(_request: Request, { params }: { params: Promise<{ projectId: string }> }) {
+  const { projectId } = await params;
+
+  try {
+    const project = await deleteSavedRuns(projectId);
+    if (!project) {
+      return jsonError("Project not found.", 404);
+    }
+
+    return NextResponse.json({ project });
+  } catch {
+    return jsonError("Could not delete project runs.", 500);
   }
 }

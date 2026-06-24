@@ -1,11 +1,13 @@
 import { NextResponse } from "next/server";
 import { jsonError } from "@/lib/api";
+import { ensureSavedRunsLaunched } from "@/lib/local-runner";
 import { deleteSavedProject, getSavedProject, listSavedRuns } from "@/lib/project-store";
 
 export async function GET(_request: Request, { params }: { params: Promise<{ projectId: string }> }) {
   const { projectId } = await params;
 
   try {
+    await ensureSavedRunsLaunched();
     const [project, runs] = await Promise.all([getSavedProject(projectId), listSavedRuns(projectId)]);
     if (!project) {
       return jsonError("Project not found.", 404);

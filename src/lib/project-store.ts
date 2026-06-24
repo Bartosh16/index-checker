@@ -89,6 +89,14 @@ export async function listSavedRuns(projectId: string): Promise<SavedRunSummary[
     .sort((left, right) => compareIso(right.requestedAt || right.createdAt, left.requestedAt || left.createdAt));
 }
 
+export async function listRunnableSavedRuns(): Promise<SavedRunSummary[]> {
+  const store = await readStore();
+  return store.runs
+    .filter((run) => run.status === "QUEUED" || run.status === "RUNNING")
+    .map(toRunSummary)
+    .sort((left, right) => compareIso(left.requestedAt || left.createdAt, right.requestedAt || right.createdAt));
+}
+
 export async function getSavedRun(projectId: string, runId: string): Promise<SavedRunDetail | null> {
   const store = await readStore();
   return store.runs.find((run) => run.projectId === projectId && run.id === runId) || null;
@@ -115,6 +123,20 @@ export async function deleteSavedRun(projectId: string, runId: string): Promise<
 
   if (store.runs.length === beforeRuns) {
     return null;
+  }
+
+  const project = syncProjectLastRun(store, projectId);
+  await writeStore(store);
+  return project;
+}
+
+export async function deleteSavedRuns(projectId: string): Promise<SavedProject | null> {
+  const store = await readStore();
+  const beforeRuns = store.runs.length;
+  store.runs = store.runs.filter((run) => run.projectId !== projectId);
+
+  if (store.runs.length === beforeRuns) {
+    return store.projects.find((project) => project.id === projectId) || null;
   }
 
   const project = syncProjectLastRun(store, projectId);

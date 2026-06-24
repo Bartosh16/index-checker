@@ -1,10 +1,12 @@
 import { NextResponse } from "next/server";
 import { jsonError, readJson } from "@/lib/api";
+import { ensureSavedRunsLaunched } from "@/lib/local-runner";
 import { listSavedProjects, saveProject } from "@/lib/project-store";
 import type { SavedProjectInput } from "@/lib/project-types";
 
 export async function GET() {
   try {
+    await ensureSavedRunsLaunched();
     const projects = await listSavedProjects();
     return NextResponse.json({ projects });
   } catch {

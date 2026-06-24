@@ -31,9 +31,16 @@ describe("findExactSerpMatch", () => {
     expect(match).toBe("https://example.com/fr/produit/");
   });
 
+  it("ignores SERP tracking params when matching URLs", () => {
+    const match = findExactSerpMatch("https://smartwoodkids.fr/", [
+      { link: "https://smartwoodkids.fr/?srsltid=AfmBOopExample" }
+    ]);
+
+    expect(match).toBe("https://smartwoodkids.fr/?srsltid=AfmBOopExample");
+  });
+
   it("builds a raw URL fallback when the strategy asks for it", () => {
     expect(buildSerpQueries("https://example.com/post", "SITE_THEN_URL")).toEqual([
-      "site:https://example.com/post",
       "site:example.com/post",
       "https://example.com/post"
     ]);

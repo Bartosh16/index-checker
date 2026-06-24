@@ -12,12 +12,12 @@ type UrlBearingResult = {
 };
 
 export function findExactSerpMatch(targetUrl: string, results: UrlBearingResult[]): string | null {
-  const normalizedTarget = normalizeUrlForComparison(targetUrl);
+  const normalizedTarget = normalizeSerpUrlForComparison(targetUrl);
 
   for (const result of results) {
     for (const candidate of getCandidateUrls(result)) {
       try {
-        if (normalizeUrlForComparison(candidate) === normalizedTarget) {
+        if (normalizeSerpUrlForComparison(candidate) === normalizedTarget) {
           return candidate;
         }
       } catch {
@@ -49,4 +49,27 @@ function getCandidateUrls(result: UrlBearingResult): string[] {
   }
 
   return candidates;
+}
+
+function normalizeSerpUrlForComparison(input: string): string {
+  const url = new URL(normalizeUrlForComparison(input));
+  for (const key of [...url.searchParams.keys()]) {
+    if (isTrackingParam(key)) {
+      url.searchParams.delete(key);
+    }
+  }
+
+  return normalizeUrlForComparison(url.toString());
+}
+
+function isTrackingParam(key: string) {
+  const normalized = key.toLowerCase();
+  return (
+    normalized === "srsltid" ||
+    normalized === "fbclid" ||
+    normalized === "gclid" ||
+    normalized === "gbraid" ||
+    normalized === "wbraid" ||
+    normalized.startsWith("utm_")
+  );
 }

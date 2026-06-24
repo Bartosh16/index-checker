@@ -43,6 +43,7 @@ export async function checkSerpVisibility(url: string, options: SerperCheckOptio
     };
   }
 
+  let retryableError: string | null = null;
   for (const query of queryAttempts) {
     try {
       const response = await fetch("https://google.serper.dev/search", {
@@ -62,6 +63,12 @@ export async function checkSerpVisibility(url: string, options: SerperCheckOptio
 
       const body = (await response.json().catch(() => ({}))) as SerperResponse;
       if (!response.ok) {
+        const error = body.message ?? `Serper request failed with ${response.status}.`;
+        if (isRetryableQueryError(error) && query !== queryAttempts[queryAttempts.length - 1]) {
+          retryableError = error;
+          continue;
+        }
+
         return {
           provider: "SERPER",
           status: "ERROR",
@@ -69,7 +76,7 @@ export async function checkSerpVisibility(url: string, options: SerperCheckOptio
           query,
           queryAttempts,
           matchedUrl: null,
-          error: body.message ?? `Serper request failed with ${response.status}.`
+          error
         };
       }
 
@@ -98,6 +105,18 @@ export async function checkSerpVisibility(url: string, options: SerperCheckOptio
     }
   }
 
+  if (retryableError && queryAttempts.length === 1) {
+    return {
+      provider: "SERPER",
+      status: "ERROR",
+      visible: false,
+      query: queryAttempts[0]!,
+      queryAttempts,
+      matchedUrl: null,
+      error: retryableError
+    };
+  }
+
   return {
     provider: "SERPER",
     status: "NOT_VISIBLE",
@@ -107,4 +126,8 @@ export async function checkSerpVisibility(url: string, options: SerperCheckOptio
     matchedUrl: null,
     error: null
   };
+}
+
+function isRetryableQueryError(message: string) {
+  return /query pattern not allowed/iu.test(message);
 }

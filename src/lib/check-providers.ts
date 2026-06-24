@@ -97,7 +97,7 @@ export function resolveConfiguredProvider(
 }
 
 export function buildSerpQueries(url: string, strategy: SerpQueryStrategy): string[] {
-  const siteQueries = uniqueValues([`site:${url}`, buildSiteQueryWithoutProtocol(url)]);
+  const siteQueries = uniqueValues([buildSiteQueryWithoutProtocol(url)]);
   if (strategy === "SITE_ONLY") {
     return siteQueries;
   }

@@ -9,6 +9,7 @@ import {
   getProjectTargetsFromLastRun,
   getSavedProject,
   getSavedRun,
+  listRunnableSavedRuns,
   markSavedRunRunning,
   updateSavedRunProgress
 } from "@/lib/project-store";
@@ -16,26 +17,71 @@ import { runSitemapCheck } from "@/lib/sitemap-check";
 
 const activeRuns = new Set<string>();
 const activeControllers = new Map<string, AbortController>();
+const pendingRuns = new Map<string, { batchSize?: number; projectId: string; runId: string }>();
+let pumpScheduled = false;
 
 export function launchSavedRun(projectId: string, runId: string, batchSize?: number) {
-  if (activeRuns.has(runId)) {
+  if (activeRuns.has(runId) || pendingRuns.has(runId)) {
     return;
   }
 
-  activeRuns.add(runId);
-  const controller = new AbortController();
-  activeControllers.set(runId, controller);
+  pendingRuns.set(runId, { batchSize, projectId, runId });
+  scheduleRunPump();
+}
+
+export async function ensureSavedRunsLaunched() {
+  const runnableRuns = await listRunnableSavedRuns();
+  for (const run of runnableRuns) {
+    if (!activeRuns.has(run.id) && !pendingRuns.has(run.id)) {
+      pendingRuns.set(run.id, { projectId: run.projectId, runId: run.id });
+    }
+  }
+  scheduleRunPump();
+}
+
+function scheduleRunPump() {
+  if (pumpScheduled) {
+    return;
+  }
+
+  pumpScheduled = true;
   setTimeout(() => {
-    void executeSavedRun(projectId, runId, batchSize, controller.signal).finally(() => {
-      activeRuns.delete(runId);
-      activeControllers.delete(runId);
-    });
+    pumpScheduled = false;
+    void pumpRunQueue();
   }, 0);
 }
 
 export async function stopSavedRun(projectId: string, runId: string) {
   activeControllers.get(runId)?.abort();
+  pendingRuns.delete(runId);
   return cancelSavedRun(projectId, runId);
+}
+
+async function pumpRunQueue() {
+  const maxConcurrent = getMaxConcurrentRuns();
+  while (activeRuns.size < maxConcurrent) {
+    const next = pendingRuns.values().next().value as
+      | { batchSize?: number; projectId: string; runId: string }
+      | undefined;
+    if (!next) {
+      return;
+    }
+
+    pendingRuns.delete(next.runId);
+    activeRuns.add(next.runId);
+    const controller = new AbortController();
+    activeControllers.set(next.runId, controller);
+
+    void executeSavedRun(next.projectId, next.runId, next.batchSize, controller.signal)
+      .catch((error) => {
+        console.error("Saved run crashed:", error);
+      })
+      .finally(() => {
+        activeRuns.delete(next.runId);
+        activeControllers.delete(next.runId);
+        scheduleRunPump();
+      });
+  }
 }
 
 async function executeSavedRun(projectId: string, runId: string, batchSize: number | undefined, signal: AbortSignal) {
@@ -171,4 +217,9 @@ function formatDuration(startedAt: string | null, completedAt: string | null) {
 
 function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Run failed.";
+}
+
+function getMaxConcurrentRuns() {
+  const parsed = Number.parseInt(process.env.MAX_CONCURRENT_SAVED_RUNS || "1", 10);
+  return Number.isFinite(parsed) ? Math.max(1, Math.min(parsed, 5)) : 1;
 }

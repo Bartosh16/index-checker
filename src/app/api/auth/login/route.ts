@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { AUTH_COOKIE_NAME, createAuthCookieValue, getAuthPassword, isAuthEnabled } from "@/lib/auth";
+import { AUTH_COOKIE_NAME, createAuthCookieValue, isAuthConfigured, verifyAdminPassword } from "@/lib/auth";
 import { jsonError, readJson } from "@/lib/api";
 
 type LoginBody = {
@@ -7,14 +7,13 @@ type LoginBody = {
 };
 
 export async function POST(request: Request) {
-  if (!isAuthEnabled()) {
-    return NextResponse.json({ ok: true });
+  if (!isAuthConfigured()) {
+    return jsonError("Najpierw ustaw hasło administratora.", 409);
   }
 
   const body = await readJson<LoginBody>(request);
-  const password = getAuthPassword();
-  if (!password || body.password !== password) {
-    return jsonError("Nieprawidlowe haslo.", 401);
+  if (!body.password || !(await verifyAdminPassword(body.password))) {
+    return jsonError("Nieprawidłowe hasło.", 401);
   }
 
   const response = NextResponse.json({ ok: true });
