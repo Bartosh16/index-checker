@@ -20,9 +20,21 @@ describe("findExactSerpMatch", () => {
     expect(match).toBeNull();
   });
 
+  it("matches exact URLs in sitelinks", () => {
+    const match = findExactSerpMatch("https://example.com/fr/produit", [
+      {
+        link: "https://example.com/fr",
+        sitelinks: [{ link: "https://example.com/fr/produit/" }]
+      }
+    ]);
+
+    expect(match).toBe("https://example.com/fr/produit/");
+  });
+
   it("builds a raw URL fallback when the strategy asks for it", () => {
     expect(buildSerpQueries("https://example.com/post", "SITE_THEN_URL")).toEqual([
       "site:https://example.com/post",
+      "site:example.com/post",
       "https://example.com/post"
     ]);
   });

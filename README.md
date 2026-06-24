@@ -1,6 +1,6 @@
 # Index Checker
 
-Index Checker is a Next.js app for checking sitemap URLs from your own domains and saving project history without requiring Postgres for the core flow.
+Index Checker is a Next.js app for checking sitemap URLs from your own domains and saving project history.
 
 Current MVP includes:
 
@@ -14,8 +14,23 @@ Current MVP includes:
 - background project runs
 - optional email notification after a whole project finishes
 - CSV export
+- dual persistence modes:
+  - local file mode
+  - hosted Postgres mode for access from anywhere
 
-The checker works without a database. Postgres remains optional for later expansion, but it is not in the critical path anymore.
+The checker still works without a database locally, but it can now run in hosted mode with Postgres-backed persistence.
+
+## Start here
+
+Choose one path:
+
+- local operator: use this README
+- AI-assisted deploy: open [BOOTSTRAP_FOR_AI.md](./BOOTSTRAP_FOR_AI.md)
+- manual hosted deploy: open [DEPLOYMENT.md](./DEPLOYMENT.md)
+
+Hosted template shortcut:
+
+[![Deploy to Netlify](https://www.netlify.com/img/deploy/button.svg)](https://app.netlify.com/start/deploy?repository=https://github.com/Bartosh16/index-checker)
 
 ## How it works
 
@@ -50,18 +65,30 @@ Exact-match logic is strict. Similar URLs are not treated as indexed.
 
 ## Important architecture note
 
-This branch is intentionally database-light:
+This app now supports two persistence strategies:
 
-- core checker: no database required
+- `local`
+  - no database required
+  - provider settings: read from `.env` and `.env.local`
+  - UI-saved secrets: written to `.env.local`
+  - projects and run history: written to `.index-checker-data/projects.json`
+- `postgres`
+  - uses `DATABASE_URL`
+  - intended for Netlify + Supabase or any hosted Postgres
+  - stores project/run state in Postgres so the app can be used remotely
+
+The design goal is still the same:
+
+- core checker should not be blocked by the database path
 - provider settings: read from `.env` and `.env.local`
 - UI-saved secrets: written to `.env.local`
-- projects and run history: written to `.index-checker-data/projects.json`
 - background runs: handled by the Node server process
 
 That means:
 
 - local use works immediately
 - self-hosted VPS / Docker use is fine
+- Netlify + Supabase is now a supported starter path
 - serverless platforms with hard request/runtime limits are not the best fit for background runs in this version
 
 ## Requirements
@@ -100,6 +127,31 @@ What it does:
 - starts the Next.js dev server
 - opens the browser automatically
 - defaults to [http://127.0.0.1:3001](http://127.0.0.1:3001)
+
+## Hosted quick start
+
+If you want the app available from anywhere and backed by Postgres:
+
+1. read [DEPLOYMENT.md](./DEPLOYMENT.md)
+2. run:
+
+```bash
+npm install
+npm run setup:hosted
+```
+
+3. deploy to Netlify
+4. run:
+
+```bash
+npm run smoke:check -- https://your-site.netlify.app
+```
+
+5. optionally seed the first project:
+
+```bash
+npm run smoke:check -- https://your-site.netlify.app --project-name "Main project" --domain "example.com" --sitemap-url "https://example.com/sitemap.xml"
+```
 
 ## Manual start
 
@@ -191,10 +243,25 @@ If you later turn this into a multi-user hosted product, move secrets to a dedic
 
 ## Project data and history
 
-Projects and run history are stored in:
+Projects and run history are stored in one of two places:
+
+- local mode:
 
 ```text
 .index-checker-data/projects.json
+```
+
+- hosted mode:
+
+```text
+public.index_checker_app_state
+```
+
+Hosted mode is enabled with:
+
+```env
+PERSISTENCE_DRIVER="postgres"
+DATABASE_URL="..."
 ```
 
 Saved data includes:
@@ -275,17 +342,21 @@ This version is best for:
 - Windows mini-server
 - VPS
 - Docker on a regular Node host
+- Netlify + Supabase for a single-owner hosted deployment
 
 Recommended for self-hosting:
 
-- long-lived Node process
-- writable disk for `.index-checker-data`
+- long-lived Node process or Netlify-hosted Next.js runtime
+- writable disk for `.index-checker-data` in local mode
 - writable `.env.local`
+- or Postgres-backed persistence in hosted mode
 - outbound access to provider APIs and SMTP
 
 Not ideal for:
 
 - strict serverless environments where background work may be killed after the request ends
+
+For the current hosted starter path, Postgres solves persistence, but very large runs will still eventually want a chunked queue worker model.
 
 ## Performance notes
 
@@ -324,6 +395,18 @@ start.bat
 skrypt.bat
 ```
 
+### Hosted setup
+
+```bash
+npm run setup:hosted
+```
+
+### Hosted smoke test
+
+```bash
+npm run smoke:check -- https://your-site.netlify.app
+```
+
 ## Environment example
 
 See [.env.example](./.env.example).
@@ -334,6 +417,8 @@ It includes:
 - optional SMTP config
 - runtime tuning
 - optional DB URL
+- persistence mode
+- app base URL for hosted smoke checks
 
 ## Development commands
 
@@ -386,5 +471,5 @@ For your own domains:
 
 - stronger true background queue for serverless environments
 - encrypted-at-rest secrets for multi-user hosting
-- optional Postgres persistence layer fully decoupled from core
+- more normalized relational Postgres persistence beyond the current JSONB app-state starter mode
 - provider-specific rate dashboards and quotas in UI

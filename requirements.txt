@@ -2,6 +2,8 @@
 Node.js >= 22.13 recommended
 npm >= 11
 PostgreSQL >= 16 or Docker Desktop with Docker Compose (optional)
+Supabase account and Postgres project (for hosted mode)
+Netlify account (for hosted mode)
 Google Search Console property access
 Google service account with webmasters.readonly access (if using GSC)
 SERP provider API key such as Serper / SerpApi / DataForSEO (if using SERP checks)

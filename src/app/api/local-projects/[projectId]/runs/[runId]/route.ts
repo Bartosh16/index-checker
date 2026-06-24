@@ -1,6 +1,11 @@
 import { NextResponse } from "next/server";
-import { jsonError } from "@/lib/api";
-import { buildSavedResultResponse, getSavedProject, getSavedRun } from "@/lib/project-store";
+import { jsonError, readJson } from "@/lib/api";
+import { stopSavedRun } from "@/lib/local-runner";
+import { buildSavedResultResponse, deleteSavedRun, getSavedProject, getSavedRun } from "@/lib/project-store";
+
+type UpdateRunBody = {
+  action?: "cancel";
+};
 
 export async function GET(
   _request: Request,
@@ -32,13 +37,49 @@ export async function GET(
         source: run.source,
         startedAt: run.startedAt,
         status: run.status,
-        summary: run.summary
-        ,
+        summary: run.summary,
         totalUrls: run.totalUrls
       },
-      result: run.status === "COMPLETED" ? buildSavedResultResponse(run) : null
+      result: run.rows.length ? buildSavedResultResponse(run) : null
     });
   } catch {
     return jsonError("Could not load saved run.", 500);
+  }
+}
+
+export async function PATCH(
+  request: Request,
+  { params }: { params: Promise<{ projectId: string; runId: string }> }
+) {
+  const { projectId, runId } = await params;
+
+  try {
+    const body = await readJson<UpdateRunBody>(request);
+    if (body.action !== "cancel") {
+      return jsonError("Unsupported run action.");
+    }
+
+    const run = await stopSavedRun(projectId, runId);
+    return NextResponse.json({ run });
+  } catch (error) {
+    return jsonError(error instanceof Error ? error.message : "Could not update run.", 400);
+  }
+}
+
+export async function DELETE(
+  _request: Request,
+  { params }: { params: Promise<{ projectId: string; runId: string }> }
+) {
+  const { projectId, runId } = await params;
+
+  try {
+    const project = await deleteSavedRun(projectId, runId);
+    if (!project) {
+      return jsonError("Run not found.", 404);
+    }
+
+    return NextResponse.json({ project });
+  } catch {
+    return jsonError("Could not delete run.", 500);
   }
 }

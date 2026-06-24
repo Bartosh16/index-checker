@@ -63,7 +63,14 @@ export type RunSitemapCheckInput = {
   domain?: string;
   excludeRules?: string[];
   gscPropertyUrl?: string;
+  onProgress?: (progress: {
+    excludedUrls?: number;
+    row?: SitemapCheckRow;
+    rowsChecked: number;
+    totalUrls: number;
+  }) => Promise<void> | void;
   restrictToUrls?: string[];
+  signal?: AbortSignal;
   serperGl?: string;
   serperHl?: string;
   sitemapUrl: string;
@@ -73,6 +80,7 @@ const DEFAULT_BATCH_SIZE = 5;
 const MAX_BATCH_SIZE = 20;
 
 export async function runSitemapCheck(input: RunSitemapCheckInput): Promise<SitemapCheckResponse> {
+  assertNotAborted(input.signal);
   const sitemapUrl = input.sitemapUrl.trim();
   const domain = normalizeDomain(input.domain || sitemapUrl);
 
@@ -87,14 +95,25 @@ export async function runSitemapCheck(input: RunSitemapCheckInput): Promise<Site
   const gscPropertyUrl = source === "GSC" ? normalizeGscProperty(input.gscPropertyUrl, domain) : null;
   const serpQueryStrategy = resolveSerpQueryStrategy();
   const collected = await collectSitemapUrls(sitemapUrl, domain);
+  assertNotAborted(input.signal);
   const restricted = filterEntries(collected, input.restrictToUrls);
   const filtered = filterExcludedUrls(restricted, input.excludeRules ?? []);
   const urls = filtered.items;
   const batchSize = normalizeBatchSize(input.batchSize);
+  let rowsChecked = 0;
+
+  await input.onProgress?.({
+    excludedUrls: filtered.excludedCount,
+    rowsChecked,
+    totalUrls: urls.length
+  });
+
   const rows = await mapWithConcurrency(urls, batchSize, async (entry) => {
+    assertNotAborted(input.signal);
     if (source === "GSC") {
       const gsc = await inspectGoogleIndex(entry.loc, gscPropertyUrl!);
-      return {
+      assertNotAborted(input.signal);
+      const row = {
         checkedAt: new Date().toISOString(),
         detail: buildGscDetail(gsc),
         error: gsc.error,
@@ -106,15 +125,25 @@ export async function runSitemapCheck(input: RunSitemapCheckInput): Promise<Site
         status: mapGscOutcome(gsc.status),
         url: entry.loc
       } satisfies SitemapCheckRow;
+      rowsChecked += 1;
+      await input.onProgress?.({
+        excludedUrls: filtered.excludedCount,
+        row,
+        rowsChecked,
+        totalUrls: urls.length
+      });
+      return row;
     }
 
     const serp = await runSerpProvider(source, entry.loc, {
       gl: input.serperGl?.trim() || "pl",
       hl: input.serperHl?.trim() || "pl",
+      signal: input.signal,
       strategy: serpQueryStrategy
     });
+    assertNotAborted(input.signal);
 
-    return {
+    const row = {
       checkedAt: new Date().toISOString(),
       detail: buildSerpDetail(serp),
       error: serp.error,
@@ -126,6 +155,14 @@ export async function runSitemapCheck(input: RunSitemapCheckInput): Promise<Site
       status: mapSerpOutcome(serp.status),
       url: entry.loc
     } satisfies SitemapCheckRow;
+    rowsChecked += 1;
+    await input.onProgress?.({
+      excludedUrls: filtered.excludedCount,
+      row,
+      rowsChecked,
+      totalUrls: urls.length
+    });
+    return row;
   });
 
   return {
@@ -194,7 +231,7 @@ function filterEntries(
 async function runSerpProvider(
   source: Exclude<IndexCheckSource, "GSC">,
   url: string,
-  options: { gl: string; hl: string; strategy: ReturnType<typeof resolveSerpQueryStrategy> }
+  options: { gl: string; hl: string; signal?: AbortSignal; strategy: ReturnType<typeof resolveSerpQueryStrategy> }
 ): Promise<SerpCheckOutcome> {
   if (source === "SERPER") {
     return checkSerpVisibility(url, options);
@@ -205,7 +242,13 @@ async function runSerpProvider(
   if (source === "SERPAPI") {
     return checkSerpApiVisibility(url, options);
   }
-  return checkSearxngVisibility(url, { strategy: options.strategy });
+  return checkSearxngVisibility(url, { signal: options.signal, strategy: options.strategy });
+}
+
+function assertNotAborted(signal: AbortSignal | undefined) {
+  if (signal?.aborted) {
+    throw new Error("Run stopped by user.");
+  }
 }
 
 function mapGscOutcome(status: string): IndexStatus {

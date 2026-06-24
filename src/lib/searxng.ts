@@ -12,6 +12,7 @@ type SearxngResponse = {
 export type SearxngCheckOptions = {
   baseUrl?: string;
   engines?: string;
+  signal?: AbortSignal;
   strategy: SerpQueryStrategy;
 };
 
@@ -44,7 +45,8 @@ export async function checkSearxngVisibility(url: string, options: SearxngCheckO
       const response = await fetch(endpoint, {
         headers: {
           Accept: "application/json"
-        }
+        },
+        signal: options.signal
       });
       const body = (await response.json().catch(() => ({}))) as SearxngResponse;
 

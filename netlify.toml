@@ -1,0 +1,16 @@
+[build]
+command = "npm run build"
+
+[build.environment]
+NODE_VERSION = "22.13.1"
+NPM_FLAGS = "--include=dev"
+
+[dev]
+command = "npm run dev -- -H 127.0.0.1 -p 3001"
+targetPort = 3001
+port = 8888
+publish = ".next"
+autoLaunch = false
+
+[template]
+required-extensions = ["supabase"]

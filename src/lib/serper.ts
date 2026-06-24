@@ -3,6 +3,7 @@ import { getOptionalEnv } from "@/lib/env";
 import { findExactSerpMatch } from "@/lib/serp-utils";
 
 type SerperOrganicResult = {
+  sitelinks?: Array<{ link?: string }>;
   title?: string;
   link?: string;
   snippet?: string;
@@ -22,6 +23,7 @@ export type SerperCheckOptions = {
   apiKey?: string;
   gl: string;
   hl: string;
+  signal?: AbortSignal;
   strategy: SerpQueryStrategy;
 };
 
@@ -49,11 +51,12 @@ export async function checkSerpVisibility(url: string, options: SerperCheckOptio
           "Content-Type": "application/json",
           "X-API-KEY": apiKey
         },
+        signal: options.signal,
         body: JSON.stringify({
           q: query,
           hl: options.hl,
           gl: options.gl,
-          num: 10
+          num: 20
         })
       });
 

@@ -1,19 +1,24 @@
 "use client";
 
 import {
+  ChevronDown,
+  ChevronRight,
   Download,
   FilePlus2,
   FileSearch,
   History,
+  LogOut,
   Moon,
   Play,
   RefreshCcw,
   Save,
   Settings2,
   ShieldCheck,
-  Sun
+  Square,
+  Sun,
+  Trash2
 } from "lucide-react";
-import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type FormEvent, type ReactNode, type Ref, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CHECK_PROVIDER_VALUES,
   PROVIDER_LABELS,
@@ -24,7 +29,7 @@ import { toCsv } from "@/lib/csv";
 import { parseExcludeRulesText, serializeExcludeRules } from "@/lib/exclude-rules";
 import type { LocalSettings } from "@/lib/local-settings";
 import type { SavedProject, SavedResultResponse, SavedRunMode, SavedRunSummary } from "@/lib/project-types";
-import type { IndexStatus, SitemapCheckResponse, SitemapCheckRow } from "@/lib/sitemap-check";
+import type { IndexStatus, SitemapCheckResponse, SitemapCheckRow, SitemapCheckSummary } from "@/lib/sitemap-check";
 
 type Notice = {
   action?: "settings";
@@ -76,14 +81,20 @@ type CreateSavedRunResponse = { project: SavedProject; run: SavedRunSummary };
 type VerificationResponse = { message: string };
 type VerificationTarget = "SERPER" | "SERPAPI" | "DATAFORSEO" | "SEARXNG" | "GSC_CREDENTIALS" | "SMTP";
 
+type FilterValue = (typeof filters)[number]["value"];
+type PanelKey = "projects" | "run" | "history" | "settings";
+type SettingsSectionKey = "execution" | "gsc" | "serper" | "serpapi" | "dataforseo" | "searxng" | "email";
+
 const filters = [
-  { value: "all", label: "All" },
-  { value: "indexed", label: "Indexed" },
-  { value: "not-indexed", label: "Not indexed" },
-  { value: "changed", label: "Changed" },
-  { value: "unknown", label: "Unknown" },
-  { value: "errors", label: "Errors" }
+  { value: "all", label: "Wszystkie" },
+  { value: "indexed", label: "Zaindeksowane" },
+  { value: "not-indexed", label: "Niezaindeksowane" },
+  { value: "changed", label: "Zmienione" },
+  { value: "unknown", label: "Nieznane" },
+  { value: "errors", label: "Błędy" }
 ] as const;
+
+const pageSizeOptions = [25, 50, 100, 200, 500, 1000] as const;
 
 const defaultRunForm = (): RunForm => ({
   batchSize: "5",
@@ -124,10 +135,32 @@ const defaultSettingsForm = (): SettingsForm => ({
 export function Dashboard() {
   const [activeRun, setActiveRun] = useState<SavedRunSummary | null>(null);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
+  const [authEnabled, setAuthEnabled] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [filter, setFilter] = useState<(typeof filters)[number]["value"]>("all");
+  const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null);
+  const [deletingRunId, setDeletingRunId] = useState<string | null>(null);
+  const [filter, setFilter] = useState<FilterValue>("all");
+  const [loadingRunId, setLoadingRunId] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
+  const [openPanels, setOpenPanels] = useState<Record<PanelKey, boolean>>({
+    history: true,
+    projects: true,
+    run: true,
+    settings: false
+  });
+  const [openSettingsSections, setOpenSettingsSections] = useState<Record<SettingsSectionKey, boolean>>({
+    dataforseo: false,
+    email: false,
+    execution: true,
+    gsc: false,
+    searxng: false,
+    serpapi: false,
+    serper: false
+  });
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState<(typeof pageSizeOptions)[number]>(25);
   const [projects, setProjects] = useState<SavedProject[]>([]);
+  const [recheckBusy, setRecheckBusy] = useState(false);
   const [result, setResult] = useState<SavedResultResponse | SitemapCheckResponse | null>(null);
   const [runForm, setRunForm] = useState<RunForm>(defaultRunForm);
   const [runHistory, setRunHistory] = useState<SavedRunSummary[]>([]);
@@ -176,6 +209,11 @@ export function Dashboard() {
     return result.rows.filter((row) => matchesFilter(row, filter));
   }, [filter, result]);
 
+  const totalPages = Math.max(1, Math.ceil(filteredRows.length / pageSize));
+  const pageStart = (page - 1) * pageSize;
+  const paginatedRows = filteredRows.slice(pageStart, pageStart + pageSize);
+  const visibleRunHistory = runHistory.slice(0, 3);
+
   const configuredProviderLabels = useMemo(
     () => settings?.configuredProviders.map((provider) => PROVIDER_LABELS[provider]) ?? [],
     [settings]
@@ -196,32 +234,43 @@ export function Dashboard() {
   const highlightedRunId =
     activeRunId ?? (result && "runId" in result && typeof result.runId === "string" ? result.runId : null);
 
-  const loadSavedRun = useCallback(async (projectId: string, runId: string, showNotice = true) => {
-    const data = await requestJson<SavedRunResponse>(`/api/local-projects/${projectId}/runs/${runId}`);
-    setActiveRun(data.run.status === "QUEUED" || data.run.status === "RUNNING" ? data.run : null);
-    setActiveRunId(data.run.status === "QUEUED" || data.run.status === "RUNNING" ? data.run.id : null);
-    setRunHistory((current) => upsertRun(current, data.run));
-    setProjects((current) => upsertProject(current, data.project));
+  useEffect(() => {
+    setPage(1);
+  }, [filter, pageSize, result]);
 
-    if (data.result) {
-      setResult(data.result);
+  const loadSavedRun = useCallback(async (projectId: string, runId: string, showNotice = true) => {
+    setLoadingRunId(runId);
+    try {
+      const data = await requestJson<SavedRunResponse>(`/api/local-projects/${projectId}/runs/${runId}`);
+      setActiveRun(data.run.status === "QUEUED" || data.run.status === "RUNNING" ? data.run : null);
+      setActiveRunId(data.run.status === "QUEUED" || data.run.status === "RUNNING" ? data.run.id : null);
+      setRunHistory((current) => upsertRun(current, data.run));
+      setProjects((current) => upsertProject(current, data.project));
+
+      if (data.result) {
+        setResult(data.result);
+        if (showNotice) {
+          setNotice({
+            text: `Wczytano skan z ${new Date(data.run.completedAt || data.run.requestedAt).toLocaleString("pl-PL")}.`,
+            tone: "info"
+          });
+        }
+        return;
+      }
+
       if (showNotice) {
         setNotice({
-          text: `Loaded saved run from ${new Date(data.run.completedAt || data.run.requestedAt).toLocaleString("pl-PL")}.`,
-          tone: "info"
+          text:
+            data.run.status === "FAILED"
+              ? data.run.errorMessage || "Ten skan zakończył się błędem."
+              : data.run.status === "CANCELLED"
+                ? "Ten skan został zatrzymany."
+                : "Ten skan nadal pracuje w tle.",
+          tone: data.run.status === "FAILED" ? "error" : "info"
         });
       }
-      return;
-    }
-
-    if (showNotice) {
-      setNotice({
-        text:
-          data.run.status === "FAILED"
-            ? data.run.errorMessage || "This run failed."
-            : "This run is still processing in the background.",
-        tone: data.run.status === "FAILED" ? "error" : "info"
-      });
+    } finally {
+      setLoadingRunId(null);
     }
   }, []);
 
@@ -258,7 +307,7 @@ export function Dashboard() {
 
       setActiveRun(null);
       setActiveRunId(null);
-      if (newestRun.status === "COMPLETED") {
+      if (newestRun.status === "COMPLETED" || newestRun.status === "CANCELLED") {
         await loadSavedRun(projectId, newestRun.id, false);
       } else {
         setResult(null);
@@ -282,6 +331,7 @@ export function Dashboard() {
         setRunHistory([]);
         setActiveRun(null);
         setActiveRunId(null);
+        setResult(null);
       }
     },
     [loadProject]
@@ -290,8 +340,13 @@ export function Dashboard() {
   useEffect(() => {
     void (async () => {
       try {
-        await loadSettings();
-        await loadProjects(null);
+        await Promise.all([
+          loadSettings(),
+          loadProjects(null),
+          requestJson<{ enabled: boolean }>("/api/auth/status")
+            .then((data) => setAuthEnabled(data.enabled))
+            .catch(() => setAuthEnabled(false))
+        ]);
       } catch (error) {
         setNotice({ text: getErrorMessage(error), tone: "error" });
       }
@@ -314,26 +369,29 @@ export function Dashboard() {
         setActiveRun(data.run.status === "QUEUED" || data.run.status === "RUNNING" ? data.run : null);
         setRunHistory((current) => upsertRun(current, data.run));
         setProjects((current) => upsertProject(current, data.project));
+        if (data.result) {
+          setResult(data.result);
+        }
 
         if (data.run.status === "COMPLETED") {
-          if (data.result) {
-            setResult(data.result);
-          }
           setActiveRunId(null);
           setActiveRun(null);
           setNotice({
-            text: `Run completed for ${data.project.name}. ${data.run.summary.notIndexed} URLs are still not indexed.`,
+            text: `Skan projektu "${data.project.name}" zakończony. Niezaindeksowane URL-e: ${data.run.summary.notIndexed}.`,
             tone: "ok"
           });
           return;
         }
 
-        if (data.run.status === "FAILED") {
+        if (data.run.status === "FAILED" || data.run.status === "CANCELLED") {
           setActiveRunId(null);
           setActiveRun(null);
           setNotice({
-            text: data.run.errorMessage || "The background run failed.",
-            tone: "error"
+            text:
+              data.run.status === "CANCELLED"
+                ? "Skan został zatrzymany."
+                : data.run.errorMessage || "Skan w tle zakończył się błędem.",
+            tone: data.run.status === "CANCELLED" ? "info" : "error"
           });
         }
       } catch (error) {
@@ -346,7 +404,7 @@ export function Dashboard() {
     void poll();
     const interval = window.setInterval(() => {
       void poll();
-    }, 3000);
+    }, 2500);
 
     return () => {
       cancelled = true;
@@ -384,34 +442,70 @@ export function Dashboard() {
   async function saveCurrentProject() {
     try {
       if (!runForm.projectName.trim()) {
-        setNotice({ text: "Add a project name before saving.", tone: "error" });
+        setNotice({ text: "Dodaj nazwę projektu przed zapisem.", tone: "error" });
         return;
       }
       if (!runForm.domain.trim() || !runForm.sitemapUrl.trim()) {
-        setNotice({ text: "Domain and sitemap URL are required to save a project.", tone: "error" });
+        setNotice({ text: "Domena i URL mapy strony są wymagane do zapisu projektu.", tone: "error" });
         return;
       }
 
       const project = await maybePersistProject();
       if (project) {
         await loadProject(project.id, false);
-        setNotice({ text: `Project "${project.name}" saved locally.`, tone: "ok" });
+        setNotice({ text: `Projekt "${project.name}" zapisany.`, tone: "ok" });
       }
     } catch (error) {
       setNotice({ text: getErrorMessage(error), tone: "error" });
     }
   }
 
+  async function deleteProject(project: SavedProject) {
+    if (!window.confirm(`Usunąć projekt "${project.name}" razem z historią skanów?`)) {
+      return;
+    }
+
+    setDeletingProjectId(project.id);
+    try {
+      await requestJson<{ ok: true }>(`/api/local-projects/${project.id}`, { method: "DELETE" });
+      setNotice({ text: `Projekt "${project.name}" usunięty.`, tone: "ok" });
+      await loadProjects(project.id === selectedProjectId ? null : selectedProjectId);
+    } catch (error) {
+      setNotice({ text: getErrorMessage(error), tone: "error" });
+    } finally {
+      setDeletingProjectId(null);
+    }
+  }
+
+  async function deleteRun(run: SavedRunSummary) {
+    if (!window.confirm("Usunąć ten wpis historii?")) {
+      return;
+    }
+
+    setDeletingRunId(run.id);
+    try {
+      await requestJson<{ project: SavedProject }>(`/api/local-projects/${run.projectId}/runs/${run.id}`, {
+        method: "DELETE"
+      });
+      setNotice({ text: "Wpis historii został usunięty.", tone: "ok" });
+      await loadProject(run.projectId, true);
+    } catch (error) {
+      setNotice({ text: getErrorMessage(error), tone: "error" });
+    } finally {
+      setDeletingRunId(null);
+    }
+  }
+
   async function runCheck(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setBusy(true);
-    setNotice({ text: "Starting sitemap check...", tone: "info" });
+    setNotice({ text: "Uruchamiam sprawdzanie mapy strony...", tone: "info" });
 
     try {
       if (selectedProjectId || runForm.projectName.trim()) {
         const savedProject = await maybePersistProject();
         if (!savedProject) {
-          throw new Error("Could not save the project before running the check.");
+          throw new Error("Nie udało się zapisać projektu przed startem skanu.");
         }
 
         const runData = await requestJson<CreateSavedRunResponse>(`/api/local-projects/${savedProject.id}/runs`, {
@@ -427,30 +521,23 @@ export function Dashboard() {
         setSelectedProjectId(runData.project.id);
         setActiveRun(runData.run);
         setActiveRunId(runData.run.id);
+        setResult(null);
         const effectiveNotificationEmail = runForm.notificationEmail.trim() || settings?.defaultNotificationEmail.trim() || "";
         setNotice({
-          text: `Run queued for ${runData.project.name}. Results will be saved automatically${effectiveNotificationEmail ? " and emailed after completion." : "."}`,
+          text: `Skan projektu "${runData.project.name}" trafił do kolejki${effectiveNotificationEmail ? " i wyśle e-mail po zakończeniu." : "."}`,
           tone: "ok"
         });
         return;
       }
 
       const data = await requestJson<SitemapCheckResponse>("/api/check-sitemap", {
-        body: JSON.stringify({
-          batchSize: Number.parseInt(runForm.batchSize, 10) || 5,
-          domain: runForm.domain,
-          excludeRules: parseExcludeRulesText(runForm.excludeRulesText),
-          gscPropertyUrl: runForm.gscPropertyUrl || inferredGscProperty,
-          serperGl: runForm.serperGl,
-          serperHl: runForm.serperHl,
-          sitemapUrl: runForm.sitemapUrl
-        }),
+        body: JSON.stringify(buildCheckPayload()),
         method: "POST"
       });
 
       setResult(data);
       setNotice({
-        text: `Checked ${data.summary.total} URLs using ${PROVIDER_LABELS[data.source]}.`,
+        text: `Sprawdzono ${data.summary.total} URL-i przez ${PROVIDER_LABELS[data.source]}.`,
         tone: "ok"
       });
     } catch (error) {
@@ -469,6 +556,51 @@ export function Dashboard() {
     }
   }
 
+  async function recheckFilteredRows() {
+    if (!result || !filteredRows.length) {
+      return;
+    }
+
+    setRecheckBusy(true);
+    setNotice({ text: `Sprawdzam ponownie ${filteredRows.length} URL-i z aktualnego filtra bez zapisu w historii...`, tone: "info" });
+
+    try {
+      const data = await requestJson<SitemapCheckResponse>("/api/check-sitemap", {
+        body: JSON.stringify(buildCheckPayload(filteredRows.map((row) => row.url))),
+        method: "POST"
+      });
+
+      setResult((current) => (current ? mergeRecheckResult(current, data) : data));
+      setNotice({
+        text: `Ponownie sprawdzono ${data.summary.total} URL-i. Wyniki zostały odświeżone bez nowego wpisu historii.`,
+        tone: "ok"
+      });
+    } catch (error) {
+      setNotice({ text: getErrorMessage(error), tone: "error" });
+    } finally {
+      setRecheckBusy(false);
+    }
+  }
+
+  async function stopActiveRun() {
+    if (!selectedProjectId || !activeRunId) {
+      return;
+    }
+
+    try {
+      const data = await requestJson<{ run: SavedRunSummary }>(`/api/local-projects/${selectedProjectId}/runs/${activeRunId}`, {
+        body: JSON.stringify({ action: "cancel" }),
+        method: "PATCH"
+      });
+      setRunHistory((current) => upsertRun(current, data.run));
+      setActiveRun(null);
+      setActiveRunId(null);
+      setNotice({ text: "Skan został zatrzymany.", tone: "info" });
+    } catch (error) {
+      setNotice({ text: getErrorMessage(error), tone: "error" });
+    }
+  }
+
   async function persistSettingsForm(showSuccessNotice: boolean) {
     const data = await requestJson<{ settings: LocalSettings }>("/api/settings", {
       body: JSON.stringify(settingsForm),
@@ -477,7 +609,7 @@ export function Dashboard() {
     hydrateSettings(data.settings);
 
     if (showSuccessNotice) {
-      setNotice({ text: "Settings saved to .env.local on the server side.", tone: "ok" });
+      setNotice({ text: "Ustawienia zapisane po stronie serwera.", tone: "ok" });
     }
 
     return data.settings;
@@ -511,7 +643,7 @@ export function Dashboard() {
         method: "POST"
       });
       hydrateSettings(data.settings);
-      setNotice({ text: "Setting cleared.", tone: "ok" });
+      setNotice({ text: "Ustawienie wyczyszczone.", tone: "ok" });
     } catch (error) {
       setNotice({ text: getErrorMessage(error), tone: "error" });
     } finally {
@@ -536,6 +668,24 @@ export function Dashboard() {
       setSettingsBusy(false);
       setVerificationTarget(null);
     }
+  }
+
+  async function logout() {
+    await fetch("/api/auth/logout", { method: "POST" }).catch(() => undefined);
+    window.location.assign("/login");
+  }
+
+  function buildCheckPayload(restrictToUrls?: string[]) {
+    return {
+      batchSize: Number.parseInt(runForm.batchSize, 10) || 5,
+      domain: result?.domain || runForm.domain,
+      excludeRules: parseExcludeRulesText(runForm.excludeRulesText),
+      gscPropertyUrl: result?.gscPropertyUrl || runForm.gscPropertyUrl || inferredGscProperty,
+      restrictToUrls,
+      serperGl: runForm.serperGl,
+      serperHl: runForm.serperHl,
+      sitemapUrl: result?.sitemapUrl || runForm.sitemapUrl
+    };
   }
 
   function hydrateProject(project: SavedProject) {
@@ -586,7 +736,7 @@ export function Dashboard() {
 
     const csv = toCsv([
       ["url", "status", "previous_status", "changed", "provider", "lookup", "detail", "checked_at", "lastmod", "error"],
-      ...result.rows.map((row) => [
+      ...filteredRows.map((row) => [
         row.url,
         row.status,
         row.previousStatus || "",
@@ -604,7 +754,7 @@ export function Dashboard() {
     const href = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = href;
-    link.download = `${result.domain || "sitemap"}-index-report.csv`;
+    link.download = `${result.domain || "sitemap"}-${filter}-index-report.csv`;
     link.click();
     URL.revokeObjectURL(href);
   }
@@ -613,6 +763,7 @@ export function Dashboard() {
     setResult(null);
     setNotice(null);
     setFilter("all");
+    setPage(1);
   }
 
   function startNewProject() {
@@ -623,14 +774,23 @@ export function Dashboard() {
     setActiveRun(null);
     setActiveRunId(null);
     setRunMode("ALL_URLS");
-    setNotice({ text: "Started a fresh unsaved project.", tone: "info" });
+    setNotice({ text: "Rozpoczęto nowy, niezapisany projekt.", tone: "info" });
   }
 
   function openSettings() {
     setShowSettings(true);
+    setOpenPanels((current) => ({ ...current, settings: true }));
     window.requestAnimationFrame(() => {
       settingsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
     });
+  }
+
+  function togglePanel(panel: PanelKey) {
+    setOpenPanels((current) => ({ ...current, [panel]: !current[panel] }));
+  }
+
+  function toggleSettingsSection(section: SettingsSectionKey) {
+    setOpenSettingsSections((current) => ({ ...current, [section]: !current[section] }));
   }
 
   return (
@@ -640,73 +800,88 @@ export function Dashboard() {
           <h1>Index Checker</h1>
           <p>
             {result
-              ? `${result.summary.total} URLs checked${"projectName" in result && result.projectName ? ` for ${result.projectName}` : ""}`
-              : "Projects, saved runs and pluggable providers without a mandatory database"}
+              ? `${result.summary.total} sprawdzonych URL-i${"projectName" in result && result.projectName ? ` dla projektu ${result.projectName}` : ""}`
+              : "Projekty, historia skanów i konfigurowalne źródła danych."}
           </p>
         </div>
         <div className="topbar-actions">
           <button className="button secondary" onClick={() => setTheme(theme === "dark" ? "light" : "dark")} type="button">
             {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
-            {theme === "dark" ? "Light mode" : "Dark mode"}
+            {theme === "dark" ? "Jasny motyw" : "Ciemny motyw"}
           </button>
           <button className="button secondary" onClick={openSettings} type="button">
             <Settings2 size={16} />
-            Settings
+            Ustawienia
           </button>
           <button className="button secondary" onClick={startNewProject} type="button">
             <FilePlus2 size={16} />
-            New project
+            Nowy projekt
           </button>
           <button className="button secondary" onClick={resetRun} type="button">
             <RefreshCcw size={16} />
-            Reset result
+            Wyczyść wynik
           </button>
-          <button className="button secondary" disabled={!result} onClick={exportCsv} type="button">
+          <button className="button secondary" disabled={!result || !filteredRows.length} onClick={exportCsv} type="button">
             <Download size={16} />
-            Export CSV
+            Eksport CSV
           </button>
+          {authEnabled ? (
+            <button className="button secondary" onClick={() => void logout()} type="button">
+              <LogOut size={16} />
+              Wyloguj
+            </button>
+          ) : null}
         </div>
       </header>
 
       <div className="workspace">
         <aside className="sidebar">
-          <section className="panel">
-            <div className="panel-heading">
-              <History size={18} />
-              <h2>Projects</h2>
-            </div>
+          <Panel
+            icon={<History size={18} />}
+            isOpen={openPanels.projects}
+            onToggle={() => togglePanel("projects")}
+            title="Projekty"
+          >
             <div className="project-list">
               {projects.map((project) => (
-                <button
-                  key={project.id}
-                  className={project.id === selectedProjectId ? "project-row active" : "project-row"}
-                  onClick={() => void loadProject(project.id)}
-                  type="button"
-                >
-                  <span>{project.name}</span>
-                  <strong>{project.lastRunAt ? new Date(project.lastRunAt).toLocaleDateString("pl-PL") : "No runs yet"}</strong>
-                </button>
+                <div key={project.id} className={project.id === selectedProjectId ? "project-row active" : "project-row"}>
+                  <button className="project-row-main" onClick={() => void loadProject(project.id)} type="button">
+                    <span>{project.name}</span>
+                    <strong>{project.lastRunAt ? new Date(project.lastRunAt).toLocaleDateString("pl-PL") : "Brak skanów"}</strong>
+                  </button>
+                  <button
+                    aria-label={`Usuń projekt ${project.name}`}
+                    className="icon-button danger"
+                    disabled={deletingProjectId === project.id}
+                    onClick={() => void deleteProject(project)}
+                    title="Usuń projekt"
+                    type="button"
+                  >
+                    <Trash2 size={15} />
+                  </button>
+                </div>
               ))}
-              {!projects.length ? <div className="empty-helper">No saved projects yet.</div> : null}
+              {!projects.length ? <div className="empty-helper">Brak zapisanych projektów.</div> : null}
             </div>
-          </section>
+          </Panel>
 
-          <section className="panel">
-            <div className="panel-heading">
-              <FileSearch size={18} />
-              <h2>Project run</h2>
-            </div>
+          <Panel
+            icon={<FileSearch size={18} />}
+            isOpen={openPanels.run}
+            onToggle={() => togglePanel("run")}
+            title="Skan projektu"
+          >
             <form className="project-form" onSubmit={runCheck}>
               <label>
-                Project name
+                Nazwa projektu
                 <input
                   onChange={(event) => setRunForm({ ...runForm, projectName: event.target.value })}
-                  placeholder="e.g. SEO blog / main domain"
+                  placeholder="np. Sklep FR"
                   value={runForm.projectName}
                 />
               </label>
               <label>
-                Domain
+                Domena
                 <input
                   onChange={(event) => setRunForm({ ...runForm, domain: event.target.value })}
                   placeholder="example.com"
@@ -714,7 +889,7 @@ export function Dashboard() {
                 />
               </label>
               <label>
-                Sitemap URL
+                URL mapy strony
                 <input
                   onChange={(event) => setRunForm({ ...runForm, sitemapUrl: event.target.value })}
                   placeholder="https://example.com/sitemap.xml"
@@ -723,41 +898,33 @@ export function Dashboard() {
                 />
               </label>
               <label>
-                GSC property (optional)
+                Właściwość GSC
                 <input
                   onChange={(event) => setRunForm({ ...runForm, gscPropertyUrl: event.target.value })}
                   placeholder={inferredGscProperty || "sc-domain:example.com"}
                   value={runForm.gscPropertyUrl}
                 />
-                <span className="form-hint">
-                  {inferredGscProperty ? `Auto: ${inferredGscProperty}` : "Auto-filled from domain or sitemap URL"}
-                </span>
+                <span className="form-hint">{inferredGscProperty ? `Auto: ${inferredGscProperty}` : "Opcjonalnie"}</span>
               </label>
               <label>
-                Notification email (optional)
+                E-mail z powiadomieniem
                 <input
                   onChange={(event) => setRunForm({ ...runForm, notificationEmail: event.target.value })}
                   placeholder={settings?.defaultNotificationEmail || "alerts@example.com"}
                   value={runForm.notificationEmail}
                 />
-                <span className="form-hint">
-                  Leave blank to use the default notification email from Settings, if one is configured.
-                </span>
               </label>
               <label>
-                Exclude rules
+                Reguły wykluczeń
                 <textarea
                   onChange={(event) => setRunForm({ ...runForm, excludeRulesText: event.target.value })}
-                  placeholder={"One rule per line\n# comments are ignored\nhttps://example.com/tag/*"}
+                  placeholder={"Jedna reguła na linię\nhttps://example.com/tag/*"}
                   value={runForm.excludeRulesText}
                 />
-                <span className="form-hint">
-                  Exact URL match or prefix match with a trailing <code>*</code>. Useful when the sitemap contains junk URLs.
-                </span>
               </label>
               <div className="inline-fields inline-fields-3">
                 <label>
-                  Batch size
+                  Rozmiar paczki
                   <input
                     inputMode="numeric"
                     onChange={(event) => setRunForm({ ...runForm, batchSize: event.target.value })}
@@ -774,87 +941,92 @@ export function Dashboard() {
                 </label>
               </div>
               <label>
-                Run mode
+                Tryb skanu
                 <select onChange={(event) => setRunMode(event.target.value as SavedRunMode)} value={runMode}>
-                  <option value="ALL_URLS">All URLs from sitemap</option>
-                  <option value="LAST_NOT_INDEXED">Only URLs that were not indexed in the last completed run</option>
+                  <option value="ALL_URLS">Wszystkie URL-e z mapy strony</option>
+                  <option value="LAST_NOT_INDEXED">Tylko ostatnio niezaindeksowane URL-e</option>
                 </select>
               </label>
               <div className="helper-box">
                 {selectedProject
-                  ? `Runs for this project are saved locally. Last source: ${selectedProject.lastRunSource ? PROVIDER_LABELS[selectedProject.lastRunSource] : "none yet"}.`
-                  : "If you add a project name, the app will save this project locally before the run so you can come back later and refresh only the URLs that still were not indexed."}
+                  ? `Ostatnie źródło: ${selectedProject.lastRunSource ? PROVIDER_LABELS[selectedProject.lastRunSource] : "brak"}.`
+                  : "Po wpisaniu nazwy projektu skan zostanie zapisany w historii projektu."}
               </div>
               <div className="button-row">
                 <button className="button secondary" onClick={() => void saveCurrentProject()} type="button">
                   <Save size={16} />
-                  {selectedProjectId ? "Update project" : "Save project"}
+                  {selectedProjectId ? "Zaktualizuj projekt" : "Zapisz projekt"}
                 </button>
                 <button className="button primary" disabled={busy} type="submit">
                   <Play size={16} />
-                  {busy ? "Starting..." : "Run check"}
+                  {busy ? "Start..." : "Uruchom skan"}
                 </button>
               </div>
             </form>
-          </section>
+          </Panel>
 
-          <section className="panel">
-            <div className="panel-heading">
-              <History size={18} />
-              <h2>Run history</h2>
-            </div>
+          <Panel
+            icon={<History size={18} />}
+            isOpen={openPanels.history}
+            onToggle={() => togglePanel("history")}
+            title="Historia skanów"
+          >
             <div className="history-list">
-              {runHistory.map((run) => (
-                <button
-                  key={run.id}
-                  className={highlightedRunId === run.id ? "history-row active" : "history-row"}
-                  onClick={() => void loadSavedRun(run.projectId, run.id)}
-                  type="button"
-                >
-                  <div>
-                    <strong>{new Date(run.completedAt || run.requestedAt).toLocaleString("pl-PL")}</strong>
-                    <span>
-                      {run.mode === "LAST_NOT_INDEXED" ? "Only previous not indexed" : "Full sitemap"} | {PROVIDER_LABELS[run.source]}
-                    </span>
-                  </div>
-                  <div className="history-metrics">
-                    <span>{formatRunStatus(run.status)}</span>
-                    <span>
-                      {run.status === "COMPLETED"
-                        ? `${run.summary.notIndexed} not indexed`
-                        : `${run.rowsChecked}/${run.totalUrls || "?"} checked`}
-                    </span>
-                  </div>
-                </button>
+              {visibleRunHistory.map((run) => (
+                <div key={run.id} className={highlightedRunId === run.id ? "history-row active" : "history-row"}>
+                  <button className="history-row-main" onClick={() => void loadSavedRun(run.projectId, run.id)} type="button">
+                    <div>
+                      <strong>{new Date(run.completedAt || run.requestedAt).toLocaleString("pl-PL")}</strong>
+                      <span>
+                        {run.mode === "LAST_NOT_INDEXED" ? "Tylko niezaindeksowane" : "Pełny skan"} | {PROVIDER_LABELS[run.source]}
+                      </span>
+                    </div>
+                    <div className="history-metrics">
+                      <span>{loadingRunId === run.id ? "Wczytywanie..." : formatRunStatus(run.status)}</span>
+                      <span>
+                        {run.status === "COMPLETED"
+                          ? `${run.summary.notIndexed} niezaindeks.`
+                          : `${run.rowsChecked}/${run.totalUrls || "?"} sprawdz.`}
+                      </span>
+                    </div>
+                  </button>
+                  <button
+                    aria-label="Usuń wpis historii"
+                    className="icon-button danger"
+                    disabled={deletingRunId === run.id || run.status === "RUNNING" || run.status === "QUEUED"}
+                    onClick={() => void deleteRun(run)}
+                    title="Usuń wpis historii"
+                    type="button"
+                  >
+                    <Trash2 size={15} />
+                  </button>
+                </div>
               ))}
-              {!runHistory.length ? (
+              {!visibleRunHistory.length ? (
                 <div className="empty-helper">
-                  {selectedProjectId ? "No saved runs yet for this project." : "Select or save a project to build history."}
+                  {selectedProjectId ? "Brak historii dla tego projektu." : "Wybierz albo zapisz projekt."}
                 </div>
               ) : null}
             </div>
-          </section>
+          </Panel>
 
-          <section className="panel" ref={settingsRef}>
-            <div className="panel-heading">
-              <Settings2 size={18} />
-              <h2>Settings</h2>
-            </div>
+          <Panel
+            icon={<Settings2 size={18} />}
+            isOpen={openPanels.settings}
+            onToggle={() => togglePanel("settings")}
+            innerRef={settingsRef}
+            title="Ustawienia"
+          >
             <div className="settings-overview">
               <StatusPill tone={settings?.resolvedProvider ? "ok" : "warn"}>
-                {settings?.resolvedProvider ? `Active: ${PROVIDER_LABELS[settings.resolvedProvider]}` : "Active: not ready"}
+                {settings?.resolvedProvider ? `Aktywne: ${PROVIDER_LABELS[settings.resolvedProvider]}` : "Aktywne: brak"}
               </StatusPill>
               <StatusPill tone="muted">
-                Mode: {PROVIDER_LABELS[(settings?.checkProvider || "AUTO") as keyof typeof PROVIDER_LABELS]}
+                Tryb: {PROVIDER_LABELS[(settings?.checkProvider || "AUTO") as keyof typeof PROVIDER_LABELS]}
               </StatusPill>
               <StatusPill tone="muted">
-                Strategy: {SERP_QUERY_STRATEGY_LABELS[(settings?.serpQueryStrategy || "SITE_THEN_URL") as keyof typeof SERP_QUERY_STRATEGY_LABELS]}
+                Strategia: {SERP_QUERY_STRATEGY_LABELS[(settings?.serpQueryStrategy || "SITE_THEN_URL") as keyof typeof SERP_QUERY_STRATEGY_LABELS]}
               </StatusPill>
-            </div>
-            <div className="helper-box compact">
-              {settings?.resolvedProvider
-                ? `Current configuration will run checks through ${PROVIDER_LABELS[settings.resolvedProvider]}. Secrets are stored server-side in .env.local and the UI only shows masked hints.`
-                : settings?.resolvedProviderError || "Configure at least one provider to enable checks."}
             </div>
             {!!configuredProviderLabels.length ? (
               <div className="provider-list">
@@ -867,14 +1039,14 @@ export function Dashboard() {
             ) : null}
             {showSettings || !settings?.resolvedProvider ? (
               <form className="project-form" onSubmit={saveSettings}>
-                <div className="settings-section">
-                  <div className="settings-section-header">
-                    <h3>Execution</h3>
-                    <p>Pick the provider mode and SERP query behavior.</p>
-                  </div>
+                <SettingsAccordion
+                  isOpen={openSettingsSections.execution}
+                  onToggle={() => toggleSettingsSection("execution")}
+                  title="Wykonywanie"
+                >
                   <div className="inline-fields">
                     <label>
-                      Provider mode
+                      Źródło sprawdzania
                       <select
                         onChange={(event) => setSettingsForm({ ...settingsForm, checkProvider: event.target.value })}
                         value={settingsForm.checkProvider}
@@ -887,7 +1059,7 @@ export function Dashboard() {
                       </select>
                     </label>
                     <label>
-                      SERP query strategy
+                      Strategia zapytania SERP
                       <select
                         onChange={(event) => setSettingsForm({ ...settingsForm, serpQueryStrategy: event.target.value })}
                         value={settingsForm.serpQueryStrategy}
@@ -900,18 +1072,15 @@ export function Dashboard() {
                       </select>
                     </label>
                   </div>
-                  <div className="helper-box compact">
-                    Site-then-URL first asks the SERP for site:&lt;url&gt;, then retries with the raw URL if the exact result is still missing.
-                  </div>
-                </div>
+                </SettingsAccordion>
 
-                <div className="settings-section">
-                  <div className="settings-section-header">
-                    <h3>Google Search Console</h3>
-                    <p>Best signal for owned domains. Requires a service account added in Search Console.</p>
-                  </div>
+                <SettingsAccordion
+                  isOpen={openSettingsSections.gsc}
+                  onToggle={() => toggleSettingsSection("gsc")}
+                  title="Google Search Console"
+                >
                   <label>
-                    Google service account file
+                    Plik konta serwisowego
                     <input
                       onChange={(event) => setSettingsForm({ ...settingsForm, googleServiceAccountFile: event.target.value })}
                       placeholder="C:\\path\\to\\service-account.json"
@@ -919,10 +1088,10 @@ export function Dashboard() {
                     />
                   </label>
                   <label>
-                    Google service account JSON
+                    JSON konta serwisowego
                     <textarea
                       onChange={(event) => setSettingsForm({ ...settingsForm, googleServiceAccountJson: event.target.value })}
-                      placeholder="Paste service account JSON if you do not want to use a file path"
+                      placeholder="Wklej JSON konta serwisowego"
                       value={settingsForm.googleServiceAccountJson}
                     />
                   </label>
@@ -933,7 +1102,7 @@ export function Dashboard() {
                       onClick={() => void clearSetting("googleJson")}
                       type="button"
                     >
-                      Clear inline GSC JSON
+                      Wyczyść JSON GSC
                     </button>
                     <button
                       className="button secondary"
@@ -942,34 +1111,34 @@ export function Dashboard() {
                       type="button"
                     >
                       <ShieldCheck size={16} />
-                      {verificationTarget === "GSC_CREDENTIALS" ? "Verifying..." : "Save and verify"}
+                      {verificationTarget === "GSC_CREDENTIALS" ? "Sprawdzanie..." : "Zapisz i sprawdź"}
                     </button>
                   </div>
                   <label>
-                    GSC language code
+                    Kod języka GSC
                     <input
                       onChange={(event) => setSettingsForm({ ...settingsForm, gscLanguageCode: event.target.value })}
                       placeholder="pl-PL"
                       value={settingsForm.gscLanguageCode}
                     />
                   </label>
-                </div>
+                </SettingsAccordion>
 
-                <div className="settings-section">
-                  <div className="settings-section-header">
-                    <h3>Managed SERP APIs</h3>
-                    <p>Fast hosted providers when GSC is unavailable or you want visibility checks from SERP.</p>
-                  </div>
+                <SettingsAccordion
+                  isOpen={openSettingsSections.serper}
+                  onToggle={() => toggleSettingsSection("serper")}
+                  title="Serper"
+                >
                   <label>
-                    Serper API key
+                    Klucz API Serper
                     <input
                       onChange={(event) => setSettingsForm({ ...settingsForm, serperApiKey: event.target.value })}
-                      placeholder={settings?.hasSerperApiKey ? "Configured - enter a new key to replace it" : "Paste Serper API key"}
+                      placeholder={settings?.hasSerperApiKey ? "Skonfigurowano - wpisz nowy klucz, aby podmienić" : "Wklej klucz Serper API"}
                       type="password"
                       value={settingsForm.serperApiKey}
                     />
                     <span className="form-hint">
-                      {settings?.serperApiKeyHint ? `Current: ${settings.serperApiKeyHint}` : "No Serper key saved yet."}
+                      {settings?.serperApiKeyHint ? `Obecnie: ${settings.serperApiKeyHint}` : "Brak zapisanego klucza."}
                     </span>
                   </label>
                   <div className="button-row">
@@ -979,7 +1148,7 @@ export function Dashboard() {
                       onClick={() => void clearSetting("serper")}
                       type="button"
                     >
-                      Clear Serper
+                      Wyczyść Serper
                     </button>
                     <button
                       className="button secondary"
@@ -988,20 +1157,26 @@ export function Dashboard() {
                       type="button"
                     >
                       <ShieldCheck size={16} />
-                      {verificationTarget === "SERPER" ? "Verifying..." : "Save and verify"}
+                      {verificationTarget === "SERPER" ? "Sprawdzanie..." : "Zapisz i sprawdź"}
                     </button>
                   </div>
+                </SettingsAccordion>
 
+                <SettingsAccordion
+                  isOpen={openSettingsSections.serpapi}
+                  onToggle={() => toggleSettingsSection("serpapi")}
+                  title="SerpApi"
+                >
                   <label>
-                    SerpApi key
+                    Klucz API SerpApi
                     <input
                       onChange={(event) => setSettingsForm({ ...settingsForm, serpApiKey: event.target.value })}
-                      placeholder={settings?.hasSerpApiKey ? "Configured - enter a new key to replace it" : "Paste SerpApi key"}
+                      placeholder={settings?.hasSerpApiKey ? "Skonfigurowano - wpisz nowy klucz, aby podmienić" : "Wklej klucz SerpApi"}
                       type="password"
                       value={settingsForm.serpApiKey}
                     />
                     <span className="form-hint">
-                      {settings?.serpApiKeyHint ? `Current: ${settings.serpApiKeyHint}` : "No SerpApi key saved yet."}
+                      {settings?.serpApiKeyHint ? `Obecnie: ${settings.serpApiKeyHint}` : "Brak zapisanego klucza."}
                     </span>
                   </label>
                   <div className="button-row">
@@ -1011,7 +1186,7 @@ export function Dashboard() {
                       onClick={() => void clearSetting("serpapi")}
                       type="button"
                     >
-                      Clear SerpApi
+                      Wyczyść SerpApi
                     </button>
                     <button
                       className="button secondary"
@@ -1020,27 +1195,33 @@ export function Dashboard() {
                       type="button"
                     >
                       <ShieldCheck size={16} />
-                      {verificationTarget === "SERPAPI" ? "Verifying..." : "Save and verify"}
+                      {verificationTarget === "SERPAPI" ? "Sprawdzanie..." : "Zapisz i sprawdź"}
                     </button>
                   </div>
+                </SettingsAccordion>
 
+                <SettingsAccordion
+                  isOpen={openSettingsSections.dataforseo}
+                  onToggle={() => toggleSettingsSection("dataforseo")}
+                  title="DataForSEO"
+                >
                   <div className="settings-subgrid">
                     <label>
-                      DataForSEO login
+                      Login DataForSEO
                       <input
                         onChange={(event) => setSettingsForm({ ...settingsForm, dataForSeoLogin: event.target.value })}
-                        placeholder={settings?.hasDataForSeoCredentials ? "Configured - enter a new login to replace it" : "DataForSEO API login"}
+                        placeholder={settings?.hasDataForSeoCredentials ? "Skonfigurowano - wpisz nowy login, aby podmienić" : "Login API"}
                         value={settingsForm.dataForSeoLogin}
                       />
                       <span className="form-hint">
-                        {settings?.dataForSeoLoginHint ? `Current: ${settings.dataForSeoLoginHint}` : "No DataForSEO login saved yet."}
+                        {settings?.dataForSeoLoginHint ? `Obecnie: ${settings.dataForSeoLoginHint}` : "Brak zapisanego loginu."}
                       </span>
                     </label>
                     <label>
-                      DataForSEO password
+                      Hasło DataForSEO
                       <input
                         onChange={(event) => setSettingsForm({ ...settingsForm, dataForSeoPassword: event.target.value })}
-                        placeholder="DataForSEO API password"
+                        placeholder="Hasło API"
                         type="password"
                         value={settingsForm.dataForSeoPassword}
                       />
@@ -1048,26 +1229,26 @@ export function Dashboard() {
                   </div>
                   <div className="settings-subgrid settings-subgrid-3">
                     <label>
-                      DataForSEO location code
+                      Kod lokalizacji
                       <input
                         onChange={(event) => setSettingsForm({ ...settingsForm, dataForSeoLocationCode: event.target.value })}
-                        placeholder="Optional numeric code"
+                        placeholder="Opcjonalny kod"
                         value={settingsForm.dataForSeoLocationCode}
                       />
                     </label>
                     <label>
-                      DataForSEO location name
+                      Nazwa lokalizacji
                       <input
                         onChange={(event) => setSettingsForm({ ...settingsForm, dataForSeoLocationName: event.target.value })}
-                        placeholder="Optional, e.g. Warsaw,Mazowieckie,Poland"
+                        placeholder="np. France"
                         value={settingsForm.dataForSeoLocationName}
                       />
                     </label>
                     <label>
-                      DataForSEO language code
+                      Kod języka
                       <input
                         onChange={(event) => setSettingsForm({ ...settingsForm, dataForSeoLanguageCode: event.target.value })}
-                        placeholder="pl"
+                        placeholder="fr"
                         value={settingsForm.dataForSeoLanguageCode}
                       />
                     </label>
@@ -1079,7 +1260,7 @@ export function Dashboard() {
                       onClick={() => void clearSetting("dataforseo")}
                       type="button"
                     >
-                      Clear DataForSEO login and password
+                      Wyczyść login i hasło
                     </button>
                     <button
                       className="button secondary"
@@ -1088,18 +1269,18 @@ export function Dashboard() {
                       type="button"
                     >
                       <ShieldCheck size={16} />
-                      {verificationTarget === "DATAFORSEO" ? "Verifying..." : "Save and verify"}
+                      {verificationTarget === "DATAFORSEO" ? "Sprawdzanie..." : "Zapisz i sprawdź"}
                     </button>
                   </div>
-                </div>
+                </SettingsAccordion>
 
-                <div className="settings-section">
-                  <div className="settings-section-header">
-                    <h3>Open-source / self-hosted</h3>
-                    <p>Use SearXNG if you have your own instance or a trusted public one with JSON enabled.</p>
-                  </div>
+                <SettingsAccordion
+                  isOpen={openSettingsSections.searxng}
+                  onToggle={() => toggleSettingsSection("searxng")}
+                  title="SearXNG"
+                >
                   <label>
-                    SearXNG base URL
+                    Bazowy URL SearXNG
                     <input
                       onChange={(event) => setSettingsForm({ ...settingsForm, searxngBaseUrl: event.target.value })}
                       placeholder="https://your-searxng-instance.example"
@@ -1107,15 +1288,12 @@ export function Dashboard() {
                     />
                   </label>
                   <label>
-                    SearXNG engines
+                    Silniki SearXNG
                     <input
                       onChange={(event) => setSettingsForm({ ...settingsForm, searxngEngines: event.target.value })}
                       placeholder="google"
                       value={settingsForm.searxngEngines}
                     />
-                    <span className="form-hint">
-                      Leave blank to use the instance default. Google is a common engine choice if the instance exposes it.
-                    </span>
                   </label>
                   <div className="button-row">
                     <button
@@ -1125,18 +1303,18 @@ export function Dashboard() {
                       type="button"
                     >
                       <ShieldCheck size={16} />
-                      {verificationTarget === "SEARXNG" ? "Verifying..." : "Save and verify"}
+                      {verificationTarget === "SEARXNG" ? "Sprawdzanie..." : "Zapisz i sprawdź"}
                     </button>
                   </div>
-                </div>
+                </SettingsAccordion>
 
-                <div className="settings-section">
-                  <div className="settings-section-header">
-                    <h3>Email notifications</h3>
-                    <p>Optional. Used only for background project runs after the whole project finishes.</p>
-                  </div>
+                <SettingsAccordion
+                  isOpen={openSettingsSections.email}
+                  onToggle={() => toggleSettingsSection("email")}
+                  title="Powiadomienia e-mail"
+                >
                   <label>
-                    Default notification email
+                    Domyślny e-mail powiadomień
                     <input
                       onChange={(event) => setSettingsForm({ ...settingsForm, defaultNotificationEmail: event.target.value })}
                       placeholder="alerts@example.com"
@@ -1145,7 +1323,7 @@ export function Dashboard() {
                   </label>
                   <div className="settings-subgrid">
                     <label>
-                      SMTP host
+                      Host SMTP
                       <input
                         onChange={(event) => setSettingsForm({ ...settingsForm, smtpHost: event.target.value })}
                         placeholder="smtp.example.com"
@@ -1153,7 +1331,7 @@ export function Dashboard() {
                       />
                     </label>
                     <label>
-                      SMTP port
+                      Port SMTP
                       <input
                         onChange={(event) => setSettingsForm({ ...settingsForm, smtpPort: event.target.value })}
                         placeholder="587"
@@ -1163,25 +1341,25 @@ export function Dashboard() {
                   </div>
                   <div className="settings-subgrid">
                     <label>
-                      SMTP user
+                      Użytkownik SMTP
                       <input
                         onChange={(event) => setSettingsForm({ ...settingsForm, smtpUser: event.target.value })}
-                        placeholder={settings?.smtpUserHint ? `Configured - ${settings.smtpUserHint}` : "smtp-user"}
+                        placeholder={settings?.smtpUserHint ? `Skonfigurowano - ${settings.smtpUserHint}` : "smtp-user"}
                         value={settingsForm.smtpUser}
                       />
                     </label>
                     <label>
-                      SMTP password
+                      Hasło SMTP
                       <input
                         onChange={(event) => setSettingsForm({ ...settingsForm, smtpPassword: event.target.value })}
-                        placeholder={settings?.hasSmtpConfig ? "Configured - enter a new password to replace it" : "SMTP password"}
+                        placeholder={settings?.hasSmtpConfig ? "Skonfigurowano - wpisz nowe hasło, aby podmienić" : "Hasło SMTP"}
                         type="password"
                         value={settingsForm.smtpPassword}
                       />
                     </label>
                   </div>
                   <label>
-                    SMTP from email
+                    E-mail nadawcy
                     <input
                       onChange={(event) => setSettingsForm({ ...settingsForm, smtpFromEmail: event.target.value })}
                       placeholder="no-reply@example.com"
@@ -1194,7 +1372,7 @@ export function Dashboard() {
                       onChange={(event) => setSettingsForm({ ...settingsForm, smtpSecure: event.target.checked })}
                       type="checkbox"
                     />
-                    <span>Use TLS / secure SMTP</span>
+                    <span>Użyj bezpiecznego SMTP / TLS</span>
                   </label>
                   <div className="button-row">
                     <button
@@ -1203,7 +1381,7 @@ export function Dashboard() {
                       onClick={() => void clearSetting("smtp")}
                       type="button"
                     >
-                      Clear SMTP password
+                      Wyczyść hasło SMTP
                     </button>
                     <button
                       className="button secondary"
@@ -1212,23 +1390,23 @@ export function Dashboard() {
                       type="button"
                     >
                       <ShieldCheck size={16} />
-                      {verificationTarget === "SMTP" ? "Verifying..." : "Save and verify"}
+                      {verificationTarget === "SMTP" ? "Sprawdzanie..." : "Zapisz i sprawdź"}
                     </button>
                   </div>
-                </div>
+                </SettingsAccordion>
 
                 <button className="button primary" disabled={settingsBusy} type="submit">
                   <Settings2 size={16} />
-                  {settingsBusy ? "Saving..." : "Save settings"}
+                  {settingsBusy ? "Zapisywanie..." : "Zapisz ustawienia"}
                 </button>
               </form>
             ) : (
               <button className="button secondary" onClick={() => setShowSettings(true)} type="button">
                 <Settings2 size={16} />
-                Open settings form
+                Otwórz formularz ustawień
               </button>
             )}
-          </section>
+          </Panel>
         </aside>
 
         <section className="main-panel">
@@ -1236,20 +1414,20 @@ export function Dashboard() {
             <div className="project-meta">
               <FileSearch size={20} />
               <div>
-                <h2>{result && "projectName" in result && result.projectName ? result.projectName : "Results"}</h2>
+                <h2>{result && "projectName" in result && result.projectName ? result.projectName : "Wyniki"}</h2>
                 <p>
                   {result
                     ? `${result.sitemapUrl}${"runMode" in result && result.runMode ? ` | ${formatRunMode(result.runMode)}` : ""}`
                     : selectedProject
-                      ? `${selectedProject.domain} | waiting for the next run`
-                      : "Run a sitemap check to see live results."}
+                      ? `${selectedProject.domain} | oczekuje na kolejny skan`
+                      : "Uruchom skan mapy strony, aby zobaczyć wyniki."}
                 </p>
               </div>
             </div>
             {result ? (
               <div className="actions compact-actions">
-                <StatusPill tone="muted">Provider: {PROVIDER_LABELS[result.source]}</StatusPill>
-                {"changedCount" in result && result.changedCount ? <StatusPill tone="warn">{result.changedCount} changed</StatusPill> : null}
+                <StatusPill tone="muted">Źródło: {PROVIDER_LABELS[result.source]}</StatusPill>
+                {"changedCount" in result && result.changedCount ? <StatusPill tone="warn">{result.changedCount} zmian</StatusPill> : null}
               </div>
             ) : null}
           </div>
@@ -1261,21 +1439,25 @@ export function Dashboard() {
                 <StatusPill tone={runStatusTone(activeRun.status)}>{formatRunStatus(activeRun.status)}</StatusPill>
               </div>
               <div>
-                <span>Progress</span>
+                <span>Postęp</span>
                 <div className="progress-track">
                   <div className="progress-fill" style={{ width: `${activeRunProgress}%` }} />
                 </div>
               </div>
               <div>
-                <span>Checked</span>
+                <span>Sprawdzone</span>
                 <strong>
                   {activeRun.rowsChecked}/{activeRun.totalUrls || "?"}
                 </strong>
               </div>
               <div>
-                <span>Started</span>
+                <span>Start</span>
                 <strong>{new Date(activeRun.startedAt || activeRun.requestedAt).toLocaleTimeString("pl-PL")}</strong>
               </div>
+              <button className="button secondary stop-button" onClick={() => void stopActiveRun()} type="button">
+                <Square size={14} />
+                Stop
+              </button>
             </div>
           ) : null}
 
@@ -1284,7 +1466,7 @@ export function Dashboard() {
               <span>{notice.text}</span>
               {notice.action === "settings" ? (
                 <button className="button secondary inline-button" onClick={openSettings} type="button">
-                  Open settings
+                  Ustawienia
                 </button>
               ) : null}
             </div>
@@ -1293,43 +1475,66 @@ export function Dashboard() {
           {result ? (
             <div className="run-summary-bar">
               <div className="summary-chip">
-                <span>Total checked</span>
+                <span>Łącznie</span>
                 <strong>{result.summary.total}</strong>
               </div>
               <div className="summary-chip">
-                <span>Indexed</span>
+                <span>Zaindeksowane</span>
                 <strong>{result.summary.indexed}</strong>
               </div>
               <div className="summary-chip">
-                <span>Not indexed</span>
+                <span>Niezaindeksowane</span>
                 <strong>{result.summary.notIndexed}</strong>
               </div>
               <div className="summary-chip">
-                <span>Unknown</span>
+                <span>Nieznane</span>
                 <strong>{result.summary.unknown}</strong>
               </div>
               <div className="summary-chip">
-                <span>Errors</span>
+                <span>Błędy</span>
                 <strong>{result.summary.errors}</strong>
               </div>
               <div className="summary-chip">
-                <span>Changed</span>
+                <span>Zmienione</span>
                 <strong>{"changedCount" in result ? result.changedCount || 0 : 0}</strong>
               </div>
             </div>
           ) : null}
 
-          <div className="filters" role="tablist" aria-label="Result filters">
-            {filters.map((item) => (
+          <div className="table-toolbar">
+            <div className="filters" role="tablist" aria-label="Filtry wyników">
+              {filters.map((item) => (
+                <button
+                  key={item.value}
+                  className={filter === item.value ? "filter active" : "filter"}
+                  onClick={() => setFilter(item.value)}
+                  type="button"
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
+            <div className="table-actions">
               <button
-                key={item.value}
-                className={filter === item.value ? "filter active" : "filter"}
-                onClick={() => setFilter(item.value)}
+                className="button secondary"
+                disabled={!result || !filteredRows.length || recheckBusy}
+                onClick={() => void recheckFilteredRows()}
                 type="button"
               >
-                {item.label}
+                <RefreshCcw size={16} />
+                {recheckBusy ? "Sprawdzanie..." : "Sprawdź filtr"}
               </button>
-            ))}
+              <label className="pagination-size">
+                Na stronie
+                <select onChange={(event) => setPageSize(Number(event.target.value) as (typeof pageSizeOptions)[number])} value={pageSize}>
+                  {pageSizeOptions.map((option) => (
+                    <option key={option} value={option}>
+                      {option}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
           </div>
 
           <div className="table-wrap">
@@ -1338,16 +1543,16 @@ export function Dashboard() {
                 <tr>
                   <th>URL</th>
                   <th>Status</th>
-                  <th>Changed</th>
-                  <th>Provider</th>
-                  <th>Lookup</th>
-                  <th>Detail</th>
-                  <th>Checked</th>
-                  <th>Error</th>
+                  <th>Zmiana</th>
+                  <th>Źródło</th>
+                  <th>Zapytanie</th>
+                  <th>Szczegóły</th>
+                  <th>Sprawdzono</th>
+                  <th>Błąd</th>
                 </tr>
               </thead>
               <tbody>
-                {filteredRows.map((row) => (
+                {paginatedRows.map((row) => (
                   <tr key={row.url}>
                     <td className="url-cell">
                       <a href={row.url} rel="noreferrer" target="_blank">
@@ -1359,11 +1564,11 @@ export function Dashboard() {
                     </td>
                     <td>
                       {row.changedSincePrevious ? (
-                        <StatusPill tone="warn">Changed</StatusPill>
+                        <StatusPill tone="warn">Zmieniony</StatusPill>
                       ) : row.previousStatus ? (
-                        <StatusPill tone="muted">No change</StatusPill>
+                        <StatusPill tone="muted">Bez zmian</StatusPill>
                       ) : (
-                        <StatusPill tone="muted">First run</StatusPill>
+                        <StatusPill tone="muted">Pierwszy raz</StatusPill>
                       )}
                     </td>
                     <td>{PROVIDER_LABELS[row.source]}</td>
@@ -1376,12 +1581,36 @@ export function Dashboard() {
                 {!filteredRows.length ? (
                   <tr>
                     <td className="empty-state" colSpan={8}>
-                      {result ? "No rows for the current filter." : "No results yet."}
+                      {result ? "Brak wierszy dla aktualnego filtra." : "Brak wyników."}
                     </td>
                   </tr>
                 ) : null}
               </tbody>
             </table>
+          </div>
+
+          <div className="pagination-bar">
+            <span>
+              {filteredRows.length
+                ? `${pageStart + 1}-${Math.min(pageStart + pageSize, filteredRows.length)} z ${filteredRows.length}`
+                : "0 wyników"}
+            </span>
+            <div className="pagination-buttons">
+              <button className="button secondary" disabled={page <= 1} onClick={() => setPage((current) => current - 1)} type="button">
+                Poprzednia
+              </button>
+              <strong>
+                {page}/{totalPages}
+              </strong>
+              <button
+                className="button secondary"
+                disabled={page >= totalPages}
+                onClick={() => setPage((current) => current + 1)}
+                type="button"
+              >
+                Następna
+              </button>
+            </div>
           </div>
         </section>
       </div>
@@ -1389,11 +1618,62 @@ export function Dashboard() {
   );
 }
 
-function StatusPill({ tone, children }: { tone: "ok" | "bad" | "muted" | "warn"; children: React.ReactNode }) {
+function Panel({
+  children,
+  icon,
+  innerRef,
+  isOpen,
+  onToggle,
+  title
+}: {
+  children: ReactNode;
+  icon: ReactNode;
+  innerRef?: Ref<HTMLElement>;
+  isOpen: boolean;
+  onToggle: () => void;
+  title: string;
+}) {
+  return (
+    <section className="panel" ref={innerRef}>
+      <button className="panel-heading panel-toggle" onClick={onToggle} type="button">
+        <span className="panel-heading-title">
+          {icon}
+          <h2>{title}</h2>
+        </span>
+        {isOpen ? <ChevronDown size={17} /> : <ChevronRight size={17} />}
+      </button>
+      {isOpen ? <div className="panel-body">{children}</div> : null}
+    </section>
+  );
+}
+
+function SettingsAccordion({
+  children,
+  isOpen,
+  onToggle,
+  title
+}: {
+  children: ReactNode;
+  isOpen: boolean;
+  onToggle: () => void;
+  title: string;
+}) {
+  return (
+    <div className="settings-section">
+      <button className="settings-section-toggle" onClick={onToggle} type="button">
+        <span>{title}</span>
+        {isOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+      </button>
+      {isOpen ? <div className="settings-section-body">{children}</div> : null}
+    </div>
+  );
+}
+
+function StatusPill({ tone, children }: { tone: "ok" | "bad" | "muted" | "warn"; children: ReactNode }) {
   return <span className={`status-pill ${tone}`}>{children}</span>;
 }
 
-function matchesFilter(row: SitemapCheckRow, filter: (typeof filters)[number]["value"]) {
+function matchesFilter(row: SitemapCheckRow, filter: FilterValue) {
   if (filter === "all") {
     return true;
   }
@@ -1412,34 +1692,87 @@ function matchesFilter(row: SitemapCheckRow, filter: (typeof filters)[number]["v
   return row.status === "ERROR";
 }
 
+function mergeRecheckResult(
+  current: SavedResultResponse | SitemapCheckResponse,
+  recheck: SitemapCheckResponse
+): SavedResultResponse | SitemapCheckResponse {
+  const currentByUrl = new Map(current.rows.map((row) => [row.url, row]));
+  const recheckedRows = new Map(
+    recheck.rows.map((row) => {
+      const previous = currentByUrl.get(row.url) ?? null;
+      return [
+        row.url,
+        {
+          ...row,
+          changedSincePrevious: previous ? previous.status !== row.status : false,
+          previousStatus: previous?.status ?? null
+        }
+      ] satisfies [string, SitemapCheckRow];
+    })
+  );
+  const rows = current.rows.map((row) => recheckedRows.get(row.url) ?? row);
+  const summary = summarizeRows(rows);
+  const changedCount = rows.filter((row) => row.changedSincePrevious).length;
+
+  return {
+    ...current,
+    changedCount,
+    rows,
+    source: recheck.source,
+    summary
+  };
+}
+
+function summarizeRows(rows: SitemapCheckRow[]): SitemapCheckSummary {
+  return rows.reduce<SitemapCheckSummary>(
+    (summary, row) => {
+      summary.total += 1;
+      if (row.status === "INDEXED") {
+        summary.indexed += 1;
+      } else if (row.status === "NOT_INDEXED") {
+        summary.notIndexed += 1;
+      } else if (row.status === "ERROR") {
+        summary.errors += 1;
+      } else {
+        summary.unknown += 1;
+      }
+      return summary;
+    },
+    { errors: 0, indexed: 0, notIndexed: 0, total: 0, unknown: 0 }
+  );
+}
+
 function formatStatus(status: IndexStatus) {
   if (status === "NOT_INDEXED") {
-    return "Not indexed";
+    return "Niezaindeksowany";
   }
   if (status === "INDEXED") {
-    return "Indexed";
+    return "Zaindeksowany";
   }
   if (status === "ERROR") {
-    return "Error";
+    return "Błąd";
   }
-  return "Unknown";
+  return "Nieznany";
 }
 
 function formatRunMode(mode: SavedRunMode) {
-  return mode === "LAST_NOT_INDEXED" ? "refreshing only previously not indexed URLs" : "full sitemap run";
+  return mode === "LAST_NOT_INDEXED" ? "odświeżanie tylko niezaindeksowanych URL-i" : "pełny skan mapy strony";
 }
 
 function formatRunStatus(status: SavedRunSummary["status"]) {
   if (status === "QUEUED") {
-    return "Queued";
+    return "W kolejce";
   }
   if (status === "RUNNING") {
-    return "Running";
+    return "Trwa";
   }
   if (status === "FAILED") {
-    return "Failed";
+    return "Błąd";
   }
-  return "Completed";
+  if (status === "CANCELLED") {
+    return "Zatrzymany";
+  }
+  return "Gotowy";
 }
 
 function statusTone(status: IndexStatus): "ok" | "bad" | "muted" | "warn" {
@@ -1510,7 +1843,7 @@ function inferGscPropertyFromForm(domainInput: string, sitemapInput: string): st
 }
 
 function getErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "The sitemap check failed.";
+  return error instanceof Error ? error.message : "Sprawdzanie mapy strony nie powiodło się.";
 }
 
 function isConfigurationError(message: string) {

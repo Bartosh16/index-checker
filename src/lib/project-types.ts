@@ -1,7 +1,7 @@
 import type { IndexCheckSource, IndexStatus, SitemapCheckResponse, SitemapCheckSummary } from "@/lib/sitemap-check";
 
 export const SAVED_RUN_MODE_VALUES = ["ALL_URLS", "LAST_NOT_INDEXED"] as const;
-export const SAVED_RUN_STATUS_VALUES = ["QUEUED", "RUNNING", "COMPLETED", "FAILED"] as const;
+export const SAVED_RUN_STATUS_VALUES = ["QUEUED", "RUNNING", "COMPLETED", "FAILED", "CANCELLED"] as const;
 
 export type SavedRunMode = (typeof SAVED_RUN_MODE_VALUES)[number];
 export type SavedRunStatus = (typeof SAVED_RUN_STATUS_VALUES)[number];

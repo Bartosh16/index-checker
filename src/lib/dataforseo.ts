@@ -28,6 +28,7 @@ export type DataForSeoCheckOptions = {
   locationName?: string;
   login?: string;
   password?: string;
+  signal?: AbortSignal;
   strategy: SerpQueryStrategy;
 };
 
@@ -60,7 +61,7 @@ export async function checkDataForSeoVisibility(
       const numericLocationCode = locationCode ? Number.parseInt(locationCode, 10) : NaN;
       const payload = {
         keyword: query,
-        depth: 10,
+        depth: 20,
         language_code: languageCode,
         ...(Number.isFinite(numericLocationCode) ? { location_code: numericLocationCode } : {}),
         ...(!Number.isFinite(numericLocationCode) && locationName ? { location_name: locationName } : {})
@@ -72,6 +73,7 @@ export async function checkDataForSeoVisibility(
           Authorization: `Basic ${auth}`,
           "Content-Type": "application/json"
         },
+        signal: options.signal,
         body: JSON.stringify([payload])
       });
 

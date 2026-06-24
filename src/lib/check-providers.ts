@@ -97,11 +97,26 @@ export function resolveConfiguredProvider(
 }
 
 export function buildSerpQueries(url: string, strategy: SerpQueryStrategy): string[] {
+  const siteQueries = uniqueValues([`site:${url}`, buildSiteQueryWithoutProtocol(url)]);
   if (strategy === "SITE_ONLY") {
-    return [`site:${url}`];
+    return siteQueries;
   }
 
-  return [`site:${url}`, url];
+  return uniqueValues([...siteQueries, url]);
+}
+
+function buildSiteQueryWithoutProtocol(input: string) {
+  try {
+    const url = new URL(input);
+    const path = url.pathname === "/" ? "" : url.pathname.replace(/\/+$/u, "");
+    return `site:${url.hostname}${path}${url.search}`;
+  } catch {
+    return `site:${input.replace(/^https?:\/\//iu, "")}`;
+  }
+}
+
+function uniqueValues(values: string[]) {
+  return [...new Set(values.filter(Boolean))];
 }
 
 function hasValue(values: ProviderEnvValues, key: string) {

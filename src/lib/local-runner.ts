@@ -3,16 +3,19 @@ import { readLocalSettings } from "@/lib/local-settings";
 import { sendProjectRunEmail } from "@/lib/mailer";
 import type { SavedRunDetail } from "@/lib/project-types";
 import {
+  cancelSavedRun,
   completeSavedRun,
   failSavedRun,
   getProjectTargetsFromLastRun,
   getSavedProject,
   getSavedRun,
-  markSavedRunRunning
+  markSavedRunRunning,
+  updateSavedRunProgress
 } from "@/lib/project-store";
 import { runSitemapCheck } from "@/lib/sitemap-check";
 
 const activeRuns = new Set<string>();
+const activeControllers = new Map<string, AbortController>();
 
 export function launchSavedRun(projectId: string, runId: string, batchSize?: number) {
   if (activeRuns.has(runId)) {
@@ -20,14 +23,22 @@ export function launchSavedRun(projectId: string, runId: string, batchSize?: num
   }
 
   activeRuns.add(runId);
+  const controller = new AbortController();
+  activeControllers.set(runId, controller);
   setTimeout(() => {
-    void executeSavedRun(projectId, runId, batchSize).finally(() => {
+    void executeSavedRun(projectId, runId, batchSize, controller.signal).finally(() => {
       activeRuns.delete(runId);
+      activeControllers.delete(runId);
     });
   }, 0);
 }
 
-async function executeSavedRun(projectId: string, runId: string, batchSize?: number) {
+export async function stopSavedRun(projectId: string, runId: string) {
+  activeControllers.get(runId)?.abort();
+  return cancelSavedRun(projectId, runId);
+}
+
+async function executeSavedRun(projectId: string, runId: string, batchSize: number | undefined, signal: AbortSignal) {
   const project = await getSavedProject(projectId);
   if (!project) {
     throw new Error("Project not found.");
@@ -39,18 +50,30 @@ async function executeSavedRun(projectId: string, runId: string, batchSize?: num
   }
 
   try {
-    await markSavedRunRunning(projectId, runId);
+    const runningRun = await markSavedRunRunning(projectId, runId);
+    if (runningRun.status === "CANCELLED") {
+      return;
+    }
     const restrictToUrls = await getProjectTargetsFromLastRun(projectId, run.mode);
+    let progressQueue: Promise<void> = Promise.resolve();
     const result = await runSitemapCheck({
       batchSize,
       domain: project.domain,
       excludeRules: project.excludeRules,
       gscPropertyUrl: project.gscPropertyUrl,
+      onProgress: (progress) => {
+        progressQueue = progressQueue.then(async () => {
+          await updateSavedRunProgress(projectId, runId, progress);
+        });
+        return progressQueue;
+      },
       restrictToUrls: restrictToUrls ?? undefined,
+      signal,
       serperGl: project.serperGl,
       serperHl: project.serperHl,
       sitemapUrl: project.sitemapUrl
     });
+    await progressQueue;
 
     const completed = await completeSavedRun(project, runId, result, {
       excludedUrls: result.excludedCount,
@@ -60,6 +83,10 @@ async function executeSavedRun(projectId: string, runId: string, batchSize?: num
 
     await maybeSendCompletionEmail(completed.run);
   } catch (error) {
+    if (signal.aborted || getErrorMessage(error) === "Run stopped by user.") {
+      await cancelSavedRun(projectId, runId);
+      return;
+    }
     const failedRun = await failSavedRun(projectId, runId, getErrorMessage(error));
     await maybeSendFailureEmail(failedRun);
   }

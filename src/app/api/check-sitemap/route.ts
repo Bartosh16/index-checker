@@ -7,6 +7,7 @@ type CheckSitemapBody = {
   domain?: string;
   excludeRules?: string[];
   gscPropertyUrl?: string;
+  restrictToUrls?: string[];
   serperGl?: string;
   serperHl?: string;
   sitemapUrl?: string;
@@ -24,6 +25,7 @@ export async function POST(request: Request) {
       domain: body.domain,
       excludeRules: body.excludeRules,
       gscPropertyUrl: body.gscPropertyUrl,
+      restrictToUrls: body.restrictToUrls,
       serperGl: body.serperGl,
       serperHl: body.serperHl,
       sitemapUrl: body.sitemapUrl

@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+import { resolveProjectStoreDriver } from "@/lib/persistence";
 import type { IndexCheckSource } from "@/lib/sitemap-check";
-import type { SitemapCheckResponse } from "@/lib/sitemap-check";
+import type { SitemapCheckResponse, SitemapCheckRow, SitemapCheckSummary } from "@/lib/sitemap-check";
 import {
   SAVED_RUN_STATUS_VALUES,
   type SavedProject,
@@ -20,6 +21,7 @@ type ProjectStoreFile = {
 };
 
 const STORE_PATH = resolve(process.cwd(), ".index-checker-data", "projects.json");
+const POSTGRES_STORE_KEY = "project_store";
 const EMPTY_SUMMARY = {
   errors: 0,
   indexed: 0,
@@ -92,6 +94,34 @@ export async function getSavedRun(projectId: string, runId: string): Promise<Sav
   return store.runs.find((run) => run.projectId === projectId && run.id === runId) || null;
 }
 
+export async function deleteSavedProject(projectId: string): Promise<boolean> {
+  const store = await readStore();
+  const beforeProjects = store.projects.length;
+  store.projects = store.projects.filter((project) => project.id !== projectId);
+  store.runs = store.runs.filter((run) => run.projectId !== projectId);
+
+  if (store.projects.length === beforeProjects) {
+    return false;
+  }
+
+  await writeStore(store);
+  return true;
+}
+
+export async function deleteSavedRun(projectId: string, runId: string): Promise<SavedProject | null> {
+  const store = await readStore();
+  const beforeRuns = store.runs.length;
+  store.runs = store.runs.filter((run) => !(run.projectId === projectId && run.id === runId));
+
+  if (store.runs.length === beforeRuns) {
+    return null;
+  }
+
+  const project = syncProjectLastRun(store, projectId);
+  await writeStore(store);
+  return project;
+}
+
 export async function createSavedRun(
   project: SavedProject,
   input: { mode: SavedRunMode; notificationEmail: string; source: IndexCheckSource }
@@ -133,12 +163,78 @@ export async function createSavedRun(
 export async function markSavedRunRunning(projectId: string, runId: string): Promise<SavedRunDetail> {
   const store = await readStore();
   const run = requireRun(store, projectId, runId);
+  if (run.status === "CANCELLED") {
+    return run;
+  }
   if (run.status === "RUNNING") {
     return run;
   }
 
   run.status = "RUNNING";
   run.startedAt = run.startedAt || new Date().toISOString();
+  await writeStore(store);
+  return run;
+}
+
+export async function cancelSavedRun(projectId: string, runId: string, message = "Run stopped by user."): Promise<SavedRunDetail> {
+  const store = await readStore();
+  const run = requireRun(store, projectId, runId);
+
+  if (run.status === "COMPLETED" || run.status === "FAILED" || run.status === "CANCELLED") {
+    return run;
+  }
+
+  run.completedAt = new Date().toISOString();
+  run.errorMessage = message;
+  run.startedAt = run.startedAt || run.createdAt;
+  run.status = "CANCELLED";
+  syncProjectLastRun(store, projectId);
+
+  await writeStore(store);
+  return run;
+}
+
+export async function updateSavedRunProgress(
+  projectId: string,
+  runId: string,
+  progress: {
+    excludedUrls?: number;
+    row?: SitemapCheckRow;
+    rowsChecked?: number;
+    totalUrls?: number;
+  }
+): Promise<SavedRunDetail> {
+  const store = await readStore();
+  const run = requireRun(store, projectId, runId);
+  if (run.status === "CANCELLED") {
+    throw new Error("Run was stopped by user.");
+  }
+  if (run.status !== "RUNNING") {
+    return run;
+  }
+
+  if (typeof progress.totalUrls === "number") {
+    run.totalUrls = Math.max(0, progress.totalUrls);
+  }
+  if (typeof progress.excludedUrls === "number") {
+    run.excludedUrls = Math.max(0, progress.excludedUrls);
+  }
+
+  if (progress.row) {
+    const row = decorateRowWithPreviousStatus(store, run, progress.row);
+    const existingIndex = run.rows.findIndex((entry) => entry.url === row.url);
+    if (existingIndex >= 0) {
+      run.rows[existingIndex] = row;
+    } else {
+      run.rows.push(row);
+    }
+  }
+
+  run.processedUrls = run.rows.length;
+  run.rowsChecked = Math.max(run.rows.length, progress.rowsChecked ?? run.rowsChecked);
+  run.summary = summarizeRows(run.rows);
+  run.changedCount = run.rows.filter((row) => row.changedSincePrevious).length;
+
   await writeStore(store);
   return run;
 }
@@ -208,6 +304,9 @@ export async function completeSavedRun(
 export async function failSavedRun(projectId: string, runId: string, errorMessage: string): Promise<SavedRunDetail> {
   const store = await readStore();
   const run = requireRun(store, projectId, runId);
+  if (run.status === "CANCELLED") {
+    return run;
+  }
 
   run.completedAt = new Date().toISOString();
   run.errorMessage = errorMessage;
@@ -263,7 +362,31 @@ export function buildSavedResultResponse(run: SavedRunDetail): SavedResultRespon
   };
 }
 
+export async function getProjectStoreStatus() {
+  const driver = resolveProjectStoreDriver();
+
+  try {
+    await readStore();
+    return {
+      databaseConfigured: Boolean(process.env.DATABASE_URL?.trim()),
+      driver,
+      ok: true as const
+    };
+  } catch (error) {
+    return {
+      databaseConfigured: Boolean(process.env.DATABASE_URL?.trim()),
+      driver,
+      ok: false as const,
+      error: error instanceof Error ? error.message : "Store check failed."
+    };
+  }
+}
+
 async function readStore(): Promise<ProjectStoreFile> {
+  if (resolveProjectStoreDriver() === "postgres") {
+    return readPostgresStore();
+  }
+
   try {
     const content = await readFile(STORE_PATH, "utf8");
     const parsed = JSON.parse(content) as Partial<ProjectStoreFile>;
@@ -277,8 +400,42 @@ async function readStore(): Promise<ProjectStoreFile> {
 }
 
 async function writeStore(store: ProjectStoreFile) {
+  if (resolveProjectStoreDriver() === "postgres") {
+    await writePostgresStore(store);
+    return;
+  }
+
   await mkdir(dirname(STORE_PATH), { recursive: true });
   await writeFile(STORE_PATH, `${JSON.stringify(store, null, 2)}\n`, "utf8");
+}
+
+async function readPostgresStore(): Promise<ProjectStoreFile> {
+  const pool = await getPostgresPool();
+  await ensurePostgresStore(pool);
+  const result = (await pool.query(
+    `select value from index_checker_app_state where key = $1 limit 1`,
+    [POSTGRES_STORE_KEY]
+  )) as { rows: Array<{ value?: Partial<ProjectStoreFile> }> };
+
+  if (!result.rows[0]?.value) {
+    return { projects: [], runs: [] };
+  }
+
+  return normalizeStore(result.rows[0].value);
+}
+
+async function writePostgresStore(store: ProjectStoreFile) {
+  const pool = await getPostgresPool();
+  await ensurePostgresStore(pool);
+  await pool.query(
+    `
+      insert into index_checker_app_state (key, value, updated_at)
+      values ($1, $2::jsonb, now())
+      on conflict (key)
+      do update set value = excluded.value, updated_at = now()
+    `,
+    [POSTGRES_STORE_KEY, JSON.stringify(store)]
+  );
 }
 
 function normalizeStore(store: Partial<ProjectStoreFile>): ProjectStoreFile {
@@ -392,6 +549,61 @@ function getLatestCompletedRun(store: ProjectStoreFile, projectId: string) {
   );
 }
 
+function syncProjectLastRun(store: ProjectStoreFile, projectId: string): SavedProject | null {
+  const projectIndex = store.projects.findIndex((entry) => entry.id === projectId);
+  if (projectIndex < 0) {
+    return null;
+  }
+
+  const latestCompletedRun = getLatestCompletedRun(store, projectId);
+  const current = store.projects[projectIndex]!;
+  const updatedAt = new Date().toISOString();
+  store.projects[projectIndex] = {
+    ...current,
+    lastRunAt: latestCompletedRun?.completedAt ?? null,
+    lastRunSource: latestCompletedRun?.source ?? null,
+    lastRunSummary: latestCompletedRun?.summary ?? null,
+    updatedAt
+  };
+  return store.projects[projectIndex]!;
+}
+
+function decorateRowWithPreviousStatus(
+  store: ProjectStoreFile,
+  run: SavedRunDetail,
+  row: SitemapCheckRow
+): SavedRunDetail["rows"][number] {
+  const previousRun = run.previousRunId
+    ? store.runs.find((entry) => entry.projectId === run.projectId && entry.id === run.previousRunId) || null
+    : null;
+  const previousStatus = previousRun?.rows.find((entry) => entry.url === row.url)?.status ?? null;
+
+  return {
+    ...row,
+    changedSincePrevious: previousStatus !== null && previousStatus !== row.status,
+    previousStatus
+  };
+}
+
+function summarizeRows(rows: SitemapCheckRow[]): SitemapCheckSummary {
+  return rows.reduce<SitemapCheckSummary>(
+    (summary, row) => {
+      summary.total += 1;
+      if (row.status === "INDEXED") {
+        summary.indexed += 1;
+      } else if (row.status === "NOT_INDEXED") {
+        summary.notIndexed += 1;
+      } else if (row.status === "ERROR") {
+        summary.errors += 1;
+      } else {
+        summary.unknown += 1;
+      }
+      return summary;
+    },
+    { errors: 0, indexed: 0, notIndexed: 0, total: 0, unknown: 0 }
+  );
+}
+
 function toRunSummary(run: SavedRunDetail): SavedRunSummary {
   return {
     changedCount: run.changedCount,
@@ -448,4 +660,48 @@ function isSavedRunStatus(value: unknown): value is SavedRunStatus {
 
 function compareIso(left: string, right: string) {
   return left.localeCompare(right);
+}
+
+async function getPostgresPool() {
+  const databaseUrl = process.env.DATABASE_URL?.trim();
+  if (!databaseUrl) {
+    throw new Error("DATABASE_URL is required when PERSISTENCE_DRIVER=postgres.");
+  }
+
+  const globalForPg = globalThis as typeof globalThis & {
+    indexCheckerPgPool?: {
+      query: (text: string, values?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }>;
+    };
+  };
+
+  if (globalForPg.indexCheckerPgPool) {
+    return globalForPg.indexCheckerPgPool;
+  }
+
+  const { Pool } = await import("pg");
+  const pool = new Pool({
+    connectionString: databaseUrl,
+    ssl: shouldUseSsl(databaseUrl) ? { rejectUnauthorized: false } : undefined
+  });
+  globalForPg.indexCheckerPgPool = pool;
+  return pool;
+}
+
+async function ensurePostgresStore(pool: {
+  query: (text: string, values?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }>;
+}) {
+  await pool.query(`
+    create table if not exists index_checker_app_state (
+      key text primary key,
+      value jsonb not null default '{}'::jsonb,
+      updated_at timestamptz not null default now()
+    )
+  `);
+}
+
+function shouldUseSsl(databaseUrl: string) {
+  if (/sslmode=disable/iu.test(databaseUrl)) {
+    return false;
+  }
+  return /supabase\.co/iu.test(databaseUrl) || /render\.com/iu.test(databaseUrl) || /neon\.tech/iu.test(databaseUrl);
 }

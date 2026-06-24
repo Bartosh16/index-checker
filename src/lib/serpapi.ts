@@ -6,6 +6,10 @@ type SerpApiResponse = {
   error?: string;
   organic_results?: Array<{
     link?: string;
+    sitelinks?: {
+      expanded?: Array<{ link?: string }>;
+      inline?: Array<{ link?: string }>;
+    };
   }>;
 };
 
@@ -13,6 +17,7 @@ export type SerpApiCheckOptions = {
   apiKey?: string;
   gl: string;
   hl: string;
+  signal?: AbortSignal;
   strategy: SerpQueryStrategy;
 };
 
@@ -40,10 +45,10 @@ export async function checkSerpApiVisibility(url: string, options: SerpApiCheckO
       endpoint.searchParams.set("q", query);
       endpoint.searchParams.set("hl", options.hl);
       endpoint.searchParams.set("gl", options.gl);
-      endpoint.searchParams.set("num", "10");
+      endpoint.searchParams.set("num", "20");
       endpoint.searchParams.set("api_key", apiKey);
 
-      const response = await fetch(endpoint);
+      const response = await fetch(endpoint, { signal: options.signal });
       const body = (await response.json().catch(() => ({}))) as SerpApiResponse;
 
       if (!response.ok || body.error) {
